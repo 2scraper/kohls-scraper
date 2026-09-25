@@ -1,0 +1,20 @@
+# kohls-scraper — core dependencies
+#
+#   pip install -r requirements.txt
+#
+# Needed by everything, including the browserless Scraper API client, the
+# fingerprint client and the offline test suite.
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# Then install exactly ONE engine — see the file per engine:
+#
+#   pip install -r requirements-playwright.txt && playwright install chromium
+#   pip install -r requirements-selenium.txt
+#   pip install -r requirements-puppeteer.txt
+#
+# One, not all three: playwright and pyppeteer declare mutually unsatisfiable
+# pins (pyee <12 vs >=13), and pyppeteer and selenium collide on urllib3
+# (<2.0 vs >=2.6). They do run side by side in practice, but `pip check`
+# reports the conflict and pip may resolve it by downgrading something you
+# wanted. Use a virtualenv per engine if you need more than one.

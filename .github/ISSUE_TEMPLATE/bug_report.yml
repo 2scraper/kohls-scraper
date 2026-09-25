@@ -1,0 +1,119 @@
+name: Bug report
+description: The scraper ran but the result was wrong, empty, or it crashed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: never paste an API key, a proxy password or a
+        full `ws://user:pass@...` endpoint into a public issue.** The scrapers
+        mask credentials in their own logs, but raw HTML dumps and the Scraper
+        API's `x-debug` header do not. Replace them with `***`.
+
+        Two things answer most reports faster than we can:
+
+        - **Everything exit 3?** kohls.com (Akamai) answered "Access Denied".
+          Measured 2026-09-25 it refused local Chromium, real Chrome and curl
+          on residential US exits alike, and served the Scraping Browser API
+          (`--cdp-endpoint`). A captcha key does not help: that page carries
+          no challenge.
+        - **Zero products on a category URL?** Keep its `?CN=…` filter:
+          without it Kohl's redirects the category to the homepage, which is
+          exit 4 and a correct answer. See
+          [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine
+      options:
+        - playwright_scraper.py
+        - puppeteer_scraper.py
+        - selenium_scraper.py
+        - scraper_api_client.py
+        - fingerprint_client.py
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser_route
+    attributes:
+      label: How was the browser reached
+      options:
+        - A browser the script launched itself
+        - A remote browser over --cdp-endpoint
+        - No browser (scraper_api_client.py over plain HTTP)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >-
+        `echo $?` straight after the run. These mean specific things — 3 is
+        refused or challenged, 4 is "ran fine, found nothing", 5 is "the page
+        was never obtained", 6 is partial. The table is in the README.
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: With credentials replaced by `***`.
+      render: shell
+      placeholder: |
+        python3 playwright_scraper.py \
+          --url "https://www.kohls.com/catalog/cuisinart.jsp?CN=Brand:Cuisinart" \
+          --pages 3 --out cuisinart
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        The whole run, not just the last line — the useful detail is usually
+        upstream of the error. Credentials replaced by `***`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: >-
+        334 products over 3 pages, as the listing's own productCount says.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run and paste:
+        ```
+        python3 -c "import sys, platform; print(sys.version, platform.platform())"
+        pip list 2>/dev/null | grep -Ei "playwright|pyppeteer|selenium|beautifulsoup4|requests"
+        python3 smoke_test.py | tail -3
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The offline suite passes on my machine (`python3 smoke_test.py`)
+          required: true
+        - label: I removed every API key, password and credentialled URL from this report
+          required: true

@@ -1,0 +1,81 @@
+name: canary
+
+# A real three-page run against kohls.com, dispatched by hand.
+#
+# Why dispatch-only, and why it SKIPS without its secret:
+#
+#   * Measured 2026-09-25, kohls.com (Akamai) refused this project's own
+#     Chromium, real Chrome and curl on US residential exits, and served
+#     the same URL through the 2Captcha Scraping Browser API. A GitHub runner
+#     is a datacentre address with a local browser — exactly what was refused
+#     — so without KOHLS_CDP_ENDPOINT this canary cannot pass, and a check
+#     that is always red teaches everyone to ignore checks.
+#   * A Scraping Browser profile's credentials live about a day, so a
+#     scheduled canary's secret would rot between runs and go red for a
+#     reason that says nothing about the site.
+#
+# Set the secret to a FRESH endpoint, then dispatch. The endpoint reaches the
+# engine through the environment, never through a command line.
+on:
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    env:
+      KOHLS_CDP_ENDPOINT: ${{ secrets.KOHLS_CDP_ENDPOINT }}
+      # A filtered listing with a known size, SORTED: the Cuisinart brand
+      # page, 337 products over 3 pages on 2026-09-25. Sorted because the
+      # default "Featured" order moved mid-run in a live test (22 duplicates
+      # across pages, ~19 products never seen); Price Low-High returned all
+      # 337 with none.
+      URL: https://www.kohls.com/catalog/cuisinart.jsp?CN=Brand:Cuisinart&S=4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip without a Scraping Browser endpoint
+        if: env.KOHLS_CDP_ENDPOINT == ''
+        run: echo "::notice::KOHLS_CDP_ENDPOINT is not set — skipping. kohls.com refuses a datacentre runner's own browser; see the comment at the top of this workflow."
+      - uses: actions/setup-python@v5
+        if: env.KOHLS_CDP_ENDPOINT != ''
+        with:
+          python-version: "3.12"
+      - name: Install core + Playwright (no local browser needed over CDP)
+        if: env.KOHLS_CDP_ENDPOINT != ''
+        run: pip install -r requirements.txt -r requirements-playwright.txt
+      - name: Three-page run
+        if: env.KOHLS_CDP_ENDPOINT != ''
+        run: |
+          set +e
+          mkdir -p live
+          python playwright_scraper.py --url "$URL" --pages 3 --out live/canary
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+      - name: Assert the run
+        if: env.KOHLS_CDP_ENDPOINT != ''
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          rc = int(os.environ.get("exit_code", "1"))
+          meta = json.load(open("live/canary.meta.json")) if os.path.exists("live/canary.meta.json") else {}
+          rows = json.load(open("live/canary.json")) if os.path.exists("live/canary.json") else []
+          priced = sum(1 for r in rows if r["price"] is not None)
+          checks = {
+              "exit 0": rc == 0,
+              "status complete": meta.get("status") == "complete",
+              "3 pages completed": meta.get("pages_completed") == 3,
+              "at least 300 rows": len(rows) >= 300,
+              "every row priced": rows and priced == len(rows),
+              "page+position unique": len({(r["page"], r["position"]) for r in rows}) == len(rows),
+              "no original_price at or below its price": all(
+                  r["original_price"] is None or r["original_price"] > r["price"] for r in rows),
+          }
+          for name, ok in checks.items():
+              print(("ok     " if ok else "FAILED ") + name)
+          if rc == 3:
+              print("::warning::exit 3 — refused. The endpoint's exit may be scored, or the profile expired.")
+          sys.exit(0 if all(checks.values()) else 1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always() && env.KOHLS_CDP_ENDPOINT != ''
+        with:
+          name: canary
+          path: live/

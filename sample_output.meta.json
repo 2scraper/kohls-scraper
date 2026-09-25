@@ -1,0 +1,20 @@
+{
+  "source": "kohls.com",
+  "mode": "listing",
+  "status": "complete",
+  "stop_reason": "completed",
+  "pages_requested": 3,
+  "pages_completed": 3,
+  "pages_failed": [],
+  "products": 8,
+  "start_url": "https://www.kohls.com/catalog/womens-clothing.jsp?CN=Gender:Womens+Department:Clothing&S=4",
+  "final_url": "https://www.kohls.com/catalog/womens-clothing.jsp?CN=Gender:Womens+Department:Clothing&S=4&WS=240",
+  "listing": {
+    "total_results": 157955,
+    "pages_available": 1317,
+    "per_page": 120,
+    "sort": "Price Low-High"
+  },
+  "finished_at": "2026-09-25T13:48:56.823353+00:00",
+  "_note": "The sidecar of the live run these rows were cut from (357 rows over 3 pages, 2026-09-25, Playwright over the Scraping Browser API); `products` is set to the number of rows kept."
+}

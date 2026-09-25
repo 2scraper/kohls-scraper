@@ -1,0 +1,105 @@
+name: tests
+
+# Offline only. Nothing here touches kohls.com, 2captcha.com or any
+# credential — and a CI job that hits a live site fails for reasons that have
+# nothing to do with the commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor the README claims. Claiming it without testing it is
+        # how a walrus operator or a `X | None` annotation ships and breaks it.
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install core dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Byte-compile everything
+        run: python -m compileall -q .
+      - name: Offline test suite
+        run: python smoke_test.py
+      - name: Offline test suite, via pytest
+        run: |
+          pip install pytest
+          pytest -q
+      - name: Every CLI answers --help; the sample is real; nothing credential-shaped is committed
+        # ONE implementation, shared with smoke_test.py, rather than inline
+        # copies here with their own allowlists: in three sibling repos the
+        # inline grep matched only ws:// while the shipped script, invoked by
+        # nothing, matched http:// too.
+        run: python .github/ci_checks.py --all
+
+  engine-smoke:
+    # One venv per engine, from its own requirements file — the engines' pins
+    # are mutually unsatisfiable, and a shared venv once installed a pyppeteer
+    # STUB (0.0.25) while CI stayed green.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [playwright, puppeteer, selenium]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install core + the ${{ matrix.engine }} engine, in its own venv
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt -r requirements-${{ matrix.engine }}.txt
+          .venv/bin/pip list --format=freeze | grep -iE '^(playwright|pyppeteer|selenium|pyee|urllib3|beautifulsoup4)='
+      - name: The requirements file is self-consistent
+        run: .venv/bin/pip check
+      - name: Offline suite, with ${{ matrix.engine }} importable
+        run: |
+          set -o pipefail
+          .venv/bin/python smoke_test.py | tee smoke.log
+          # The engine this job installed must IMPORT — checked by importing
+          # it, not by grepping the suite's wording.
+          .venv/bin/python -c "import ${{ matrix.engine }}_scraper"
+          if grep -q "SKIPPED ${{ matrix.engine }}_scraper" smoke.log; then
+            echo "::error::${{ matrix.engine }}_scraper reported a skip although it is installed"
+            exit 1
+          fi
+      - name: The ${{ matrix.engine }} CLI answers --help
+        run: .venv/bin/python ${{ matrix.engine }}_scraper.py --help >/dev/null
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t kohls-scraper:ci .
+      - name: The entrypoint runs inside the image
+        run: docker run --rm kohls-scraper:ci
+      - name: Chromium is actually installed in the image
+        run: |
+          docker run --rm --entrypoint python3 kohls-scraper:ci -c "
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              b = p.chromium.launch()
+              print('chromium', b.version)
+              b.close()"
+      - name: The image carries no credentials and no test material
+        run: |
+          bad=0
+          for f in .env smoke_test.py tests fixtures_generated.json sample_output.json; do
+            if docker run --rm --entrypoint sh kohls-scraper:ci -c "test -e /app/$f"; then
+              echo "::error::$f is inside the image and should not be"; bad=1
+            fi
+          done
+          test "$bad" = "0"

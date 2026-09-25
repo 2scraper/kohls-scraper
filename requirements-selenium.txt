@@ -1,0 +1,9 @@
+# Selenium engine. Needs Google Chrome installed; Selenium Manager (built into
+# Selenium >= 4.11) fetches a matching chromedriver on first run.
+#
+# It CANNOT attach to an authenticated remote CDP endpoint (chromedriver's
+# `debuggerAddress` takes a bare host:port) and CANNOT authenticate a proxy
+# (`--proxy-server=` takes an address only). Use Playwright or pyppeteer for
+# either — see README.
+#
+selenium>=4.15.0

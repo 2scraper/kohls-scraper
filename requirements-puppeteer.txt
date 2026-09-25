@@ -1,0 +1,11 @@
+# Puppeteer engine, via pyppeteer (effectively unmaintained; its own README
+# points at Playwright).
+#
+# It downloads its own Chromium on first run, and that build is OLD — and on
+# an Apple-silicon Mac an x86_64 binary that does not start (measured
+# 2026-09-25). Pass --chromium-path with a current Chrome or Chromium.
+#
+# pyppeteer pins pyee<12 and urllib3<2.0, which conflict with playwright and
+# selenium respectively. Use a separate virtualenv for this engine.
+#
+pyppeteer>=1.0.2
