@@ -91,7 +91,9 @@ prefix, identical across every 2scraper repo.
 | `sort` | payload | the ordering the site reports (`Featured`, `Price Low-High`, …) |
 | `skus_total`, `skus_in_stock` | product page | how many size × colour SKUs, and how many are in stock |
 
-A run also writes `<out>.meta.json`: status, stop reason, which pages failed,
+A run also writes `<out>.meta.json`: status, stop reason, which pages failed
+and which were never attempted (by the listing's own page number), the data
+files this run wrote,
 and the listing's own arithmetic (`total_results`, `pages_available`,
 `per_page`, `sort`) — so "complete" is not mistaken for "exhaustive". A
 3-page run of a 1,317-page category is a complete run and a 0.2% sample.
@@ -202,7 +204,11 @@ command line, where `ps` and your shell history would keep them.
 answered with no products · `5` the page was never obtained (a dead proxy, a
 blank document, a timeout, a CDP connection refused, a remote API failing) ·
 `6` partial. A run that gathers nothing writes nothing, so last night's good
-file is never replaced by an empty one.
+file is never replaced by an empty one — and every file is written to a
+temporary name and renamed into place, so a run killed mid-write cannot
+leave a truncated one either. `1` also covers an internal error (a bug here,
+not the site): what was gathered is still written, marked partial with stop
+reason `internal_error`, and the log carries the masked traceback.
 
 ## Engines
 

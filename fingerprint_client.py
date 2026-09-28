@@ -403,8 +403,10 @@ def main() -> int:
     # os.environ, which `load_env` is what fills from the file. Calling it
     # here rather than relying on an engine having called it is the whole
     # point -- this is a standalone entry point.
-    env_config.load_env()
-    p.add_argument("--key", default=env_config.env_value("TWOCAPTCHA_KEY"),
+    #
+    # Loaded AFTER argv is parsed, not before: `--help` (run by CI and the
+    # offline suite for every CLI) must not read the developer's .env.
+    p.add_argument("--key", default=None,
                    help="API key. Defaults to TWOCAPTCHA_KEY from the "
                         "environment or .env (safer than argv).")
     # Measured against the live API on 2026-09-09, because the example this
@@ -431,6 +433,9 @@ def main() -> int:
     p.add_argument("--show-init-script", action="store_true",
                    help="Print the Playwright init script for this fingerprint")
     args = p.parse_args()
+    if not args.key:
+        env_config.load_env()
+        args.key = env_config.env_value("TWOCAPTCHA_KEY")
 
     if not args.key:
         logger.error("No API key. Pass --key, or better, export TWOCAPTCHA_KEY.")

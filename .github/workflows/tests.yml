@@ -31,10 +31,14 @@ jobs:
         run: python -m compileall -q .
       - name: Offline test suite
         run: python smoke_test.py
-      - name: Offline test suite, via pytest
+      # Collected, not run: tests/test_smoke.py runs smoke_test.py again as a
+      # subprocess, so running it here doubled this job's time for no extra
+      # coverage (audit, 2026-09-27). Collecting still proves `pytest` works
+      # as an entry point.
+      - name: The pytest entry point collects
         run: |
           pip install pytest
-          pytest -q
+          pytest -q --collect-only
       - name: Every CLI answers --help; the sample is real; nothing credential-shaped is committed
         # ONE implementation, shared with smoke_test.py, rather than inline
         # copies here with their own allowlists: in three sibling repos the

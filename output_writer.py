@@ -13,8 +13,10 @@ Two modes, one row shape
 Both modes yield the SAME class, because on kohls.com a detail page is not a
 different kind of object from a tile — it is the same product described more
 fully, under the same id (`webID`, the number in `prd-NNN`). So there is no
-second dataclass here, and `diff_runs.py` can compare a listing run against a
-product run without either side being an artefact.
+second dataclass here, and a listing row and a product row join on `sku`.
+`diff_runs.py` still refuses to diff a listing run against a product run:
+the detail-only columns are null on one side and filled on the other, so a
+diff would describe the mode change rather than the catalogue.
 
 `Product` keeps the family's field order exactly, with the Kohl's-specific
 columns appended after `price_source`, so a consumer written against another
@@ -26,9 +28,11 @@ gets the right header for the mode that produced it.
 
 import csv
 import json
+import os
+import tempfile
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime, timezone
-from typing import Optional, List, Set, Sequence, Any, Type
+from typing import Callable, Optional, List, Set, Sequence, Any, Tuple, Type
 
 
 # One shop, one host. Kept as a constant rather than written into every row
@@ -190,12 +194,65 @@ def _csv_value(v: Any) -> Any:
     return v
 
 
-def write_json(rows: Sequence[Any], path: str) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump([asdict(r) for r in rows], f, ensure_ascii=False, indent=2)
+# ---------------------------------------------------------------------------
+# Atomic publication
+# ---------------------------------------------------------------------------
+# Every output file is written to a temporary file in the SAME directory,
+# fsync'd, and only then renamed over the real path with os.replace, which
+# is atomic on one filesystem. A run killed half-way through a write, a full
+# disk, or an exception inside the CSV writer therefore leaves the previous
+# run's file exactly as it was, instead of a truncated file under the real
+# name — which is what "an empty result never overwrites a good one" (see
+# `save`) has to mean for a failure DURING the write, too.
+#
+# A run's files (JSON, CSV, sidecar) are all staged first and renamed
+# together at the end, sidecar last, so a failure while writing any one of
+# them publishes none of them.
+#
+# Read once at import: os.umask can only be read by setting it, which is not
+# thread-safe, and mkstemp creates files 0600 — the published file should get
+# the same mode a plain open() would have given it.
+_UMASK = os.umask(0)
+os.umask(_UMASK)
 
 
-def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Product) -> None:
+def _stage(path: str, write: Callable[[Any], None], newline: Optional[str] = None) -> str:
+    """Write via `write(fileobj)` to a temp file beside `path`; return its path."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory,
+                               prefix="." + os.path.basename(path) + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
+            write(f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o666 & ~_UMASK)
+    except BaseException:
+        _discard([(tmp, path)])
+        raise
+    return tmp
+
+
+def _commit(staged: Sequence[Tuple[str, str]]) -> None:
+    """Rename every staged (tmp, final) pair into place, in order."""
+    for tmp, final in staged:
+        os.replace(tmp, final)
+
+
+def _discard(staged: Sequence[Tuple[str, str]]) -> None:
+    for tmp, _ in staged:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _json_writer(rows: Sequence[Any]) -> Callable[[Any], None]:
+    return lambda f: json.dump([asdict(r) for r in rows], f, ensure_ascii=False, indent=2)
+
+
+def _csv_writer(rows: Sequence[Any], row_cls: Type) -> Callable[[Any], None]:
     # An empty result still gets the header row. A zero-byte file makes a
     # consumer fail on read (no columns to parse) instead of reading a valid
     # table with zero rows — and "an empty result is still a well-formed
@@ -204,11 +261,67 @@ def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Product) -> None:
     # The header comes from `row_cls`, not from the first row, so an empty
     # run still writes the columns of the mode that produced it.
     fieldnames = [f.name for f in fields(row_cls)]
-    with open(path, "w", encoding="utf-8", newline="") as f:
+
+    def write(f):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in rows:
             writer.writerow({k: _csv_value(v) for k, v in asdict(r).items()})
+    return write
+
+
+def write_json(rows: Sequence[Any], path: str) -> None:
+    _commit([(_stage(path, _json_writer(rows)), path)])
+
+
+def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Product) -> None:
+    _commit([(_stage(path, _csv_writer(rows, row_cls), newline=""), path)])
+
+
+# ---------------------------------------------------------------------------
+# Raw page material: debug dumps and --dump-html
+# ---------------------------------------------------------------------------
+def write_private_text(path: str, text: str) -> None:
+    """Write `text` to `path` readable by the owner only (0600).
+
+    For raw page material: SECURITY.md warns that a served page can carry
+    session material, and these dumps are the one place it reaches disk
+    unmasked. They were written with a plain open(), so they inherited the
+    umask (usually world-readable 0644). fchmod as well as the create mode,
+    because O_CREAT's mode does nothing to a file that already exists.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1
+            f.write(text or "")
+    finally:
+        if fd != -1:
+            os.close(fd)
+
+
+def make_private(path: str) -> None:
+    """chmod 0600 a file some other code wrote (a driver's screenshot)."""
+    if os.path.exists(path):
+        os.chmod(path, 0o600)
+
+
+def output_dir_problem(out_prefix: str) -> Optional[str]:
+    """Why `--out` cannot be written, or None when it can.
+
+    Checked BEFORE a browser starts. Found by an audit on 2026-09-27: with
+    `--out` in a directory that does not exist, a refused page became
+    "exit 5, page_error" instead of "exit 3, blocked" (writing its debug
+    dump raised), and a run that DID gather rows crashed with a traceback
+    at the final write — after every page had been fetched and paid for.
+    """
+    directory = os.path.dirname(os.path.abspath(out_prefix))
+    if not os.path.isdir(directory):
+        return f"the --out directory {directory} does not exist"
+    if not os.access(directory, os.W_OK | os.X_OK):
+        return f"the --out directory {directory} is not writable"
+    return None
 
 
 # Exit code used when a run completes but produced nothing. Distinct from 1
@@ -273,18 +386,27 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
     diff_runs.py reads it to refuse a comparison between runs that are not
     both complete, and between runs of different `mode`.
     """
-    path = f"{out_prefix}.meta.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+    path = _meta_path(out_prefix)
+    _commit([(_stage(path, _meta_writer(meta)), path)])
     print(f"[+] Wrote run metadata -> {path} (status={meta.get('status')})")
     return path
+
+
+def _meta_path(out_prefix: str) -> str:
+    return f"{out_prefix}.meta.json"
+
+
+def _meta_writer(meta: dict) -> Callable[[Any], None]:
+    return lambda f: json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
 def run_meta(status: str, stop_reason: str, pages_requested: int,
              pages_completed: int, start_url: str, final_url: str,
              products: int, pages_failed: Optional[List[int]] = None,
              mode: str = "listing", source: str = SOURCE_DEFAULT,
-             listing: Optional[dict] = None) -> dict:
+             listing: Optional[dict] = None,
+             pages_unattempted: Optional[List[int]] = None,
+             outputs: Optional[List[str]] = None) -> dict:
     """Build the metadata dict for a finished run.
 
     `status` is the field a consumer branches on:
@@ -309,6 +431,21 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     a description once pages can be fetched independently and page 3 can fail
     while 4 and 5 succeed. Recording the numbers keeps the sidecar honest
     about WHICH part of the catalogue is missing, not just how much.
+
+    Page numbers are the listing's own (the `WS=` page), not the order this
+    run fetched them in: a run started on page 3 whose second request fails
+    names page 4. It named page 2 until an audit on 2026-09-27.
+
+    `pages_unattempted` lists pages that were planned and never fetched —
+    the queue a concurrent run's workers left behind when they died. They
+    are not in `pages_failed` (nothing was tried), and before this field
+    existed they were in no field at all, so a partial sidecar could not say
+    which pages it was missing. Pages past the listing's end are not
+    unattempted; there was nothing there to get.
+
+    `outputs` names the data files THIS run wrote, by basename. With
+    `--format json` a CSV left beside it by an earlier run is not this run's,
+    and the sidecar is the only place that can say so.
     """
     return {
         "source": source,
@@ -318,6 +455,8 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "pages_requested": pages_requested,
         "pages_completed": pages_completed,
         "pages_failed": pages_failed or [],
+        "pages_unattempted": pages_unattempted or [],
+        "outputs": outputs or [],
         "products": products,
         "start_url": start_url,
         "final_url": final_url,
@@ -343,20 +482,43 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 
     `allow_empty=True` is for the legitimate case: a filter that genuinely
     matches nothing, where an empty file is the answer.
+
+    Both files are staged and then renamed into place together (see
+    "Atomic publication"): a failure while writing either leaves both
+    previous files untouched.
     """
+    rc, staged = _stage_rows(rows, out_prefix, fmt, allow_empty, row_cls)
+    _commit(staged)
+    _report_saved(rows, staged)
+    return rc
+
+
+def _stage_rows(rows: Sequence[Any], out_prefix: str, fmt: str,
+                allow_empty: bool, row_cls: Type) -> Tuple[int, List[Tuple[str, str]]]:
+    """Stage the row files `save` would write; return (exit code, staged pairs)."""
     if not rows and not allow_empty:
         print(f"[!] 0 products — refusing to write {out_prefix}.json/.csv, so an "
               f"earlier good result isn't overwritten with an empty one. "
               f"Pass --allow-empty if an empty result is the expected answer.")
-        return EXIT_NO_PRODUCTS
+        return EXIT_NO_PRODUCTS, []
 
-    if fmt in ("json", "both"):
-        write_json(rows, f"{out_prefix}.json")
-        print(f"[+] Saved {len(rows)} products -> {out_prefix}.json")
-    if fmt in ("csv", "both"):
-        write_csv(rows, f"{out_prefix}.csv", row_cls=row_cls)
-        print(f"[+] Saved {len(rows)} products -> {out_prefix}.csv")
-    return 0 if rows else EXIT_NO_PRODUCTS
+    staged: List[Tuple[str, str]] = []
+    try:
+        if fmt in ("json", "both"):
+            path = f"{out_prefix}.json"
+            staged.append((_stage(path, _json_writer(rows)), path))
+        if fmt in ("csv", "both"):
+            path = f"{out_prefix}.csv"
+            staged.append((_stage(path, _csv_writer(rows, row_cls), newline=""), path))
+    except BaseException:
+        _discard(staged)
+        raise
+    return (0 if rows else EXIT_NO_PRODUCTS), staged
+
+
+def _report_saved(rows: Sequence[Any], staged: Sequence[Tuple[str, str]]) -> None:
+    for _, final in staged:
+        print(f"[+] Saved {len(rows)} products -> {final}")
 
 
 # Stop reasons that mean the run saw everything there was to see. Anything
@@ -394,7 +556,8 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                start_url: str, final_url: str,
                pages_failed: Optional[List[int]] = None,
                mode: str = "listing", source: str = SOURCE_DEFAULT,
-               listing: Optional[dict] = None) -> int:
+               listing: Optional[dict] = None,
+               pages_unattempted: Optional[List[int]] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all three browser engines so the status/exit-code mapping
@@ -405,6 +568,11 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     the previous run's still-intact good output (which `save` deliberately
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
+
+    Row files and sidecar are published in ONE commit, sidecar last: they
+    are staged first, and nothing is renamed into place until all of them
+    were written. A sidecar describing a run whose rows never landed (or
+    the reverse) cannot be left behind by a failure mid-write.
     """
     # Completeness is decided by the reason AND by the evidence. A named
     # list of stop reasons cannot cover a failure recorded somewhere else,
@@ -419,20 +587,31 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     # fix: 28 of 32 repos behaved this way. Same shape as the exit-code
     # unification this file already carries — a rule keyed on a list of
     # names has a hole for every name nobody added to it.
-    complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
+    complete = (stop_reason in COMPLETE_STOP_REASONS and not pages_failed
+                and not pages_unattempted)
     row_cls = ROW_CLASS_BY_MODE.get(mode, Product)
-    rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls)
+    rc, staged = _stage_rows(rows, out_prefix, fmt, allow_empty, row_cls)
     wrote_output = bool(rows) or allow_empty
 
     if wrote_output:
         status = "complete" if (rows and complete) else (
             "partial" if rows else "failed")
-        write_run_meta(out_prefix, run_meta(
+        meta = run_meta(
             status=status, stop_reason=stop_reason,
             pages_requested=pages_requested, pages_completed=pages_completed,
-            pages_failed=pages_failed, mode=mode, source=source,
-            listing=listing,
-            start_url=start_url, final_url=final_url, products=len(rows)))
+            pages_failed=pages_failed, pages_unattempted=pages_unattempted,
+            outputs=[os.path.basename(final) for _, final in staged],
+            mode=mode, source=source, listing=listing,
+            start_url=start_url, final_url=final_url, products=len(rows))
+        meta_path = _meta_path(out_prefix)
+        try:
+            staged.append((_stage(meta_path, _meta_writer(meta)), meta_path))
+        except BaseException:
+            _discard(staged)
+            raise
+        _commit(staged)
+        _report_saved(rows, staged[:-1])
+        print(f"[+] Wrote run metadata -> {meta_path} (status={status})")
 
     if not rows:
         # Nothing gathered at all, and WHY decides the code. The three

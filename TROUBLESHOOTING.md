@@ -87,7 +87,10 @@ key is fine; the Fingerprint API is a separate subscription.
 ## Exit 6: partial
 
 A later page was refused, or the run was cut short. The rows written are
-real; `<out>.meta.json` names the pages that failed. `diff_runs.py` refuses to
+real; `<out>.meta.json` names the pages that failed (`pages_failed`) and, for
+a concurrent run whose workers died, the pages never attempted
+(`pages_unattempted`) — by the listing's own page number, so a run started on
+page 3 names page 4, not "page 2". `diff_runs.py` refuses to
 compare a partial run, because its unfetched pages would read as delisted
 products.
 
@@ -108,6 +111,11 @@ unexpectedly)`** — pyppeteer 2.0's own Chromium is old, and on an
 Apple-silicon Mac it is an x86_64 build that does not start. Pass
 `--chromium-path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`
 (or Playwright's Chrome for Testing).
+
+**`Page N hit an INTERNAL error (…)`, exit 1** — a bug in this scraper, not
+the site. The pages gathered before it are still written (partial, stop
+reason `internal_error`); the log carries a traceback with credentials
+already masked. Please file it.
 
 Anything else with a traceback: file a bug with the command (credentials
 replaced by `***`) and the whole output.

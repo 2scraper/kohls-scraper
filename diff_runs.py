@@ -217,8 +217,9 @@ def _run_status(path: str) -> Tuple[Optional[str], Optional[dict]]:
     """Read the `<out>.meta.json` sidecar beside a run's JSON output.
 
     Returns (status, meta), or (None, None) when there is no sidecar — which
-    is the normal case for output written before run metadata existed, or by
-    `scraper_api_client.py` (single fetch, no pagination to cut short).
+    is the case for output written before run metadata existed. Every
+    engine writes one now, scraper_api_client.py included (it goes through
+    the same output_writer.finish_run).
     """
     meta_path = re.sub(r"\.json$", "", path) + ".meta.json"
     try:
