@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 toolkit can: a patch release means "fixes", not that every default is
 frozen — a patch that changes a default says so at the top of its entry.
 
-## [1.0.1] - Unreleased
+## [1.0.1] - 2026-09-28
 
 Fixes from a third-party audit (2026-09-27) and its re-check. Each is
 pinned by a smoke_test.py check that fails on 1.0.0.
