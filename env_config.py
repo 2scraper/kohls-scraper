@@ -227,21 +227,43 @@ def apply(args, keys=None, quiet=False):
     return args
 
 
-if __name__ == "__main__":
-    # `python3 env_config.py` — report what is configured, without printing
-    # any secret. Useful as a first step when a key "isn't being picked up".
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+# The only variables whose VALUE the report below may print. An allowlist,
+# not a denylist: the report used to hide a value only when the name held
+# "KEY" or the value held "@", so a Scraping Browser endpoint that carried
+# its credential as a query token (`?token=…`) would have been printed in
+# full. A variable is shown only when it is known not to be a secret.
+SAFE_TO_SHOW = frozenset({"KOHLS_URL"})
+
+
+def report() -> None:
+    """Print what is configured, without printing any secret."""
     where = load_env()
     print(f".env file:      {where or 'not found (this is fine — env vars still work)'}")
     for env_name, dest in ENV_KEYS.items():
         value = env_value(env_name)
         if value is None:
             state = "not set"
-        elif "KEY" in env_name or "@" in value:
-            state = f"set ({len(value)} chars, hidden)"
-        else:
+        elif env_name in SAFE_TO_SHOW:
             state = f"set ({value})"
+        else:
+            state = f"set ({len(value)} chars, hidden)"
         print(f"  {env_name:<24} -> --{dest.replace('_', '-'):<16} {state}")
     extras = unknown_keys()
     if extras:
         print("\nUnrecognised keys in .env (typo?): " + ", ".join(extras))
+
+
+if __name__ == "__main__":
+    # `python3 env_config.py` — report what is configured, without printing
+    # any secret. Useful as a first step when a key "isn't being picked up".
+    #
+    # Arguments are parsed BEFORE .env is touched. This entry point used to
+    # ignore argv, so `env_config.py --help` — which CI and the offline suite
+    # run for every CLI — read the developer's .env and printed the report.
+    import argparse
+    argparse.ArgumentParser(
+        description="Report which kohls-scraper settings are configured "
+                    "(from the environment or .env), without printing any "
+                    "secret.").parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    report()

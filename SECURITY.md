@@ -100,11 +100,15 @@ Two places can hold credentials that people do not expect, because unlike our
 own log lines they are **not** masked:
 
 - **raw HTML dumps** (`--dump-html`, and the automatic `_debug.html` on a
-  refused or empty page) — a page can carry session material
+  refused or empty page) — a page can carry session material. Since 1.0.1
+  they (and the debug screenshot) are created owner-only (`0600`); before,
+  they inherited the umask and were usually world-readable
 - **your shell history**, if you passed a key on the command line
 
 (The Scraper API's `x-debug` response header and its error bodies used to be a
 third; both are redacted before they are logged, and smoke_test.py pins it.)
 
 Use `.env` for credentials. It is in `.gitignore`, and `python3 env_config.py`
-reports what is configured without printing any values.
+reports what is configured without printing any values (only `KOHLS_URL`,
+which is not a secret, is shown). No CLI reads `.env` for `--help`, and the
+offline suite proves it under an audit hook.

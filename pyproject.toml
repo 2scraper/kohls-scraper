@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kohls-scraper"
-version = "1.0.0"
+version = "1.0.1"
 description = "kohls.com scraper: category grids, search results and product pages; Playwright, Selenium, pyppeteer or the 2Captcha Scraping Browser API."
 readme = "README.md"
 license = "MIT"

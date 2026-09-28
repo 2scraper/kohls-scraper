@@ -6,6 +6,61 @@ All notable changes to this project are documented here. The format follows
 toolkit can: a patch release means "fixes", not that every default is
 frozen — a patch that changes a default says so at the top of its entry.
 
+## [1.0.1] - Unreleased
+
+Fixes from a third-party audit (2026-09-27) and its re-check. Each is
+pinned by a smoke_test.py check that fails on 1.0.0.
+
+### Fixed
+
+- **Output is published atomically.** JSON, CSV and the sidecar are written
+  to temporary files beside their targets, fsync'd, and renamed into place
+  together, sidecar last. A run killed mid-write, a full disk or an error in
+  the CSV writer used to leave a truncated file under the real name — and
+  JSON, CSV and sidecar from different runs.
+- **Page numbers in the sidecar, logs and debug dumps are the listing's
+  own.** A run started on `WS=120` (page 2) whose next page failed recorded
+  `pages_failed: [2]` — the page that had been served — instead of `[3]`.
+- **Unattempted pages are named.** A concurrent run whose workers died left
+  its queued pages out of every sidecar field. They are now listed in the
+  new `pages_unattempted`, and make the run partial.
+- **A missing `--out` directory is refused up front (exit 2).** It used to
+  turn a refused page into "exit 5, page_error" (the debug dump could not be
+  written), and to crash a successful run with a traceback at the final
+  write, after every page had been fetched and paid for. Same check in
+  `scraper_api_client.py`.
+- **A debug dump that cannot be written no longer changes the exit code.**
+- **Internal errors are no longer reported as transport failures.** A
+  `TypeError`, `KeyError`, `AttributeError`… inside the scraper used to be
+  recorded like a dead browser (exit 5 on page 1). The run now keeps what it
+  gathered (partial, stop reason `internal_error`), logs the traceback with
+  credentials masked, and exits 1. Browser and driver errors keep their
+  meaning.
+- **`--help` no longer reads `.env`.** `env_config.py` ignored its
+  arguments, so `env_config.py --help` — which CI and the offline suite run
+  — loaded `.env` and printed the configuration report; `fingerprint_client.py`
+  loaded `.env` before parsing arguments. Both now parse first. The report
+  shows a value only for `KOHLS_URL` (an allowlist): the old rule hid a value
+  only when its name held `KEY` or it contained `@`, so an endpoint carrying
+  its credential as `?token=…` would have been printed.
+- **`scraper_api_client.py` validates its numbers.** `--timeout` outside
+  1-120 was sent to the API as-is; a negative `--retry-delay` crashed in
+  `time.sleep` after a paid attempt.
+
+### Changed
+
+- Raw page dumps (`_debug.html`, the debug screenshot, `--dump-html`, the
+  Scraper API client's dumps) are created `0600`.
+- The sidecar gains `pages_unattempted` and `outputs` (the data files this
+  run wrote — with `--format json`, a CSV left by an earlier run is not
+  this run's). Both are additive.
+- CI runs the offline suite once, not twice: the pytest step now only checks
+  that the entry point collects.
+- Stale docstrings corrected: `output_writer` no longer claims a listing run
+  can be diffed against a product run (`diff_runs.py` refuses that), and
+  `diff_runs._run_status` no longer says the Scraper API client writes no
+  sidecar.
+
 ## [1.0.0] - 2026-09-25
 
 First release, rebuilt on the 2scraper family core. It replaces an

@@ -76,7 +76,7 @@ import requests
 from product_parser import (parse_products, detect_bot_challenge,
                             detect_page_state, is_supported_host, listing_kind,
                             listing_info)
-from output_writer import finish_run
+from output_writer import finish_run, write_private_text, output_dir_problem
 import env_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -267,9 +267,7 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
         return EXIT_API_ERROR
 
     if args.dump_html:
-        with open(args.dump_html, "w", encoding="utf-8") as f:
-            f.write(html)
-        logger.info("Raw HTML written to %s", args.dump_html)
+        _dump(args.dump_html, html)
 
     # Same policy as the browser engines, through the same classifier.
     state = detect_page_state(html, status=upstream_status, url=args.url)
@@ -280,9 +278,7 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                      "HTTP %s) — the page was never obtained.", upstream_status)
         return EXIT_API_ERROR
     if state in ("blocked", "challenge"):
-        dump = f"{args.out}_scraperapi_debug.html"
-        with open(dump, "w", encoding="utf-8") as f:
-            f.write(html)
+        dump = _dump(f"{args.out}_scraperapi_debug.html", html)
         logger.error(
             "kohls.com refused the Scraper API's request (%s, upstream HTTP %s, "
             "%d bytes) — saved to %s. Akamai decides this per client; the "
@@ -316,9 +312,7 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
     products = parse_products(html, args.url, category=args.category)
     logger.info("Parsed %d products.", len(products))
     if not products:
-        dump = f"{args.out}_scraperapi_debug.html"
-        with open(dump, "w", encoding="utf-8") as f:
-            f.write(html)
+        dump = _dump(f"{args.out}_scraperapi_debug.html", html)
         logger.warning("0 products parsed from a served page — saved the raw "
                        "response to %s.", dump)
     info = listing_info(html)
@@ -330,7 +324,43 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                       listing={k: v for k, v in info.items() if k != "served_page"})
 
 
-def parse_args():
+def _dump(path: str, html: str) -> str:
+    """Write raw HTML 0600, best-effort; return the path, or "" if it failed.
+
+    Same rule as the browser engines' debug dumps: raw page material is
+    owner-only, and a dump that cannot be written must not change the exit
+    code the run reports.
+    """
+    try:
+        write_private_text(path, html)
+    except OSError as e:
+        logger.warning("Could not write %s (%s).", path, e)
+        return ""
+    logger.info("Raw HTML written to %s", path)
+    return path
+
+
+def validate_args(p: argparse.ArgumentParser, args) -> None:
+    """Range checks the browser engines already had and this client did not.
+
+    Without them `--timeout -5` was sent to the API as-is (a billable task
+    rejected remotely, or clamped somewhere out of sight), and a negative
+    `--retry-delay` crashed in time.sleep() with a traceback — exit 1 —
+    after a paid attempt.
+    """
+    if not 1 <= args.timeout <= MAX_API_TIMEOUT:
+        p.error(f"--timeout must be between 1 and {MAX_API_TIMEOUT} seconds "
+                f"(the API's own limit); got {args.timeout}")
+    if args.retries < 0:
+        p.error("--retries cannot be negative (it counts EXTRA attempts)")
+    if args.retry_delay < 0:
+        p.error("--retry-delay cannot be negative")
+    problem = output_dir_problem(args.out)
+    if problem:
+        p.error(f"{problem} — create it first.")
+
+
+def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="kohls.com scraper — 2captcha Scraper API edition (no "
                     "local browser). One listing page per run. Whether Akamai "
@@ -380,7 +410,8 @@ def parse_args():
                    help="Seconds between retries (default 10)")
     p.add_argument("--dump-html", default=None,
                    help="Also write the raw returned HTML to this path (always, even on success)")
-    args = p.parse_args()
+    args = p.parse_args(argv)
+    validate_args(p, args)
     # This client uses --key and --cdp-url rather than --twocaptcha-key and
     # --cdp-endpoint, so the env mapping is spelled out instead of defaulted.
     keys = {"TWOCAPTCHA_KEY": "key", "KOHLS_URL": "url"}

@@ -460,6 +460,10 @@ class FakeDriver:
         FakeDriver.instances.append(self)
 
     def open(self):
+        # plan["workers_die"]: every driver after the first (the concurrent
+        # workers') fails to start, leaving its pages in the queue.
+        if self.plan.get("workers_die") and FakeDriver.instances.index(self) > 0:
+            raise RuntimeError("worker browser failed to start")
         return self
 
     def relaunch(self):
@@ -501,19 +505,29 @@ class FakeDriver:
         pass
 
 
-def _run(argv, plan):
+def _run(argv, plan, inspect=None, prepare=None):
+    """Run scrape() against `plan`; `prepare(dir)` runs before it, and
+    `inspect(dir)` sees the output dir before it is deleted — its result is
+    returned as a fourth value."""
     FakeDriver.instances = []
     p = build_parser("test")
+    seen = None
     with tempfile.TemporaryDirectory() as d:
         args = p.parse_args(argv + ["--out", os.path.join(d, "out"),
                                     "--delay", "0", "--retry-delay", "0"])
         validate_args(p, args)          # deliberately NOT env_config.apply
+        if prepare:
+            prepare(d)
         rc = quiet(browser_bridge.scrape, args,
                    lambda a, pool, remote=False: FakeDriver(a, pool, remote, plan))
         meta_path = os.path.join(d, "out.meta.json")
         meta = json.load(open(meta_path)) if os.path.exists(meta_path) else None
         out_path = os.path.join(d, "out.json")
         rows = json.load(open(out_path)) if os.path.exists(out_path) else None
+        if inspect:
+            seen = inspect(d)
+    if inspect:
+        return rc, meta, rows, seen
     return rc, meta, rows
 
 
@@ -566,10 +580,63 @@ def test_whole_run():
     ok &= check("page 2 refused after page 1 served: exit 6, partial, page 2 named",
                 rc == EXIT_PARTIAL and meta["status"] == "partial" and meta["pages_failed"] == [2])
 
+    p0 = build_parser("t")
     base = "https://www.kohls.com/catalog/womens-clothing.jsp?CN=Gender:Womens+Department:Clothing"
     rc, meta, rows = _run(["--url", base + "&WS=120"], {2: (200, f2)})
     ok &= check("a run STARTED on WS=120 keeps its rows, stamped page 2",
                 rc == 0 and rows and all(r["page"] == 2 for r in rows))
+
+    # Audit 2026-09-27: the sidecar numbered pages by request order, so a run
+    # started on page 2 whose NEXT page failed named page 2 — the page that
+    # had in fact been served.
+    rc, meta, rows, files = _run(["--url", base + "&WS=120", "--pages", "2"],
+                                 {2: (200, f2), 3: (403, deny)},
+                                 inspect=lambda d: sorted(os.listdir(d)))
+    ok &= check("started on page 2, page 3 refused: the sidecar names page 3, not 2",
+                rc == EXIT_PARTIAL and meta and meta["pages_failed"] == [3])
+    ok &= check("...and its debug dump is named for page 3",
+                "out_page3_debug.html" in files and "out_page2_debug.html" not in files)
+
+    rc, meta, rows = _run(["--url", url4, "--pages", "3", "--concurrency", "2"],
+                          {1: (200, s4), "workers_die": True})
+    ok &= check("workers that never started: their pages are listed as unattempted",
+                rc == EXIT_PARTIAL and meta and meta.get("pages_unattempted") == [2, 3]
+                and meta["pages_failed"] == [] and meta["status"] == "partial")
+    rc, meta, rows = _run(["--url", url4, "--pages", "2"], {1: (200, s4), 2: (200, f2)})
+    ok &= check("...and a complete run lists none", meta and meta.get("pages_unattempted") == [])
+
+    # An INTERNAL error (a bug here) is not a transport failure: exit 1, with
+    # what was gathered still written and the sidecar saying why.
+    bug = TypeError("'NoneType' object is not subscriptable")
+    rc, meta, rows = _run(["--url", url4, "--pages", "3"], {1: (200, s4), 2: (200, f2), 3: bug})
+    ok &= check("a TypeError on page 3: exit 1, pages 1-2 kept, stop reason internal_error",
+                rc == getattr(browser_bridge, "EXIT_INTERNAL", None) == 1 and rows and len(rows) == 18
+                and meta["stop_reason"] == "internal_error" and meta["status"] == "partial")
+    rc, _, _ = _run(["--url", url4], {1: bug})
+    ok &= check("...on page 1: exit 1, not the transport failure's 5", rc == 1)
+    ok &= check("a Selenium/Playwright-style driver error is still a transport failure",
+                isinstance(TypeError("x"), getattr(browser_bridge, "INTERNAL_ERRORS", ()))
+                and not isinstance(RuntimeError("x"), browser_bridge.INTERNAL_ERRORS)
+                and not isinstance(DriverError("x"), browser_bridge.INTERNAL_ERRORS))
+    ok &= check("redact() masks a query token as well as user:pass",
+                getattr(browser_bridge, "redact", str)("ws://u:p@h:1/?token=abcdef123 key=zzzzzz99")
+                == "ws://***:***@h:1/?token=*** key=***")
+
+    # A debug dump that cannot be written must not change the exit code. A
+    # DIRECTORY where the dump file should go makes the write fail for real.
+    rc, _, _ = _run(["--url", url4], {1: (403, deny)},
+                    prepare=lambda d: os.mkdir(os.path.join(d, "out_page1_debug.html")))
+    ok &= check("a refused page whose debug dump fails to write is still exit 3, not 5",
+                rc == EXIT_BLOCKED)
+    rc, _, _, mode = _run(["--url", url4], {1: (403, deny)}, inspect=lambda d: oct(
+        os.stat(os.path.join(d, "out_page1_debug.html")).st_mode & 0o777))
+    ok &= check("the debug dump is owner-only (0600), got %s" % mode, mode == "0o600")
+
+    with tempfile.TemporaryDirectory() as d:
+        bad = os.path.join(d, "missing", "out")
+        ok &= check("--out in a directory that does not exist is refused before any fetch",
+                    quiet(lambda: _raises_exit(lambda: validate_args(
+                        p0, p0.parse_args(["--url", url4, "--out", bad])))))
 
     tag = pp._ISLAND_RE.search(s4).group(0)
     props = json.loads(__import__("html").unescape(pp._ATTR_RE["props"].search(tag).group(1)))
@@ -710,6 +777,57 @@ def test_output_contract():
                    pages_completed=3, start_url="u", final_url="u", pages_failed=[4])
         ok &= check("a complete reason with a failed page is still partial (exit 6)",
                     rc == EXIT_PARTIAL)
+        meta = json.load(open(out + ".meta.json"))
+        ok &= check("the sidecar names the files THIS run wrote (json only here)",
+                    meta.get("outputs") == ["o.json"])
+
+        # Atomic publication: a failure while writing the CSV leaves the
+        # previous JSON, CSV and sidecar exactly as they were, and no temp
+        # files behind.
+        good = [Product(sku="1", price=1.0)]
+        quiet(finish_run, good, out, "both", False, blocked=False,
+              stop_reason="completed", pages_requested=1, pages_completed=1,
+              start_url="u", final_url="u")
+        before = {ext: open(out + ext, "rb").read() for ext in (".json", ".csv", ".meta.json")}
+        import output_writer
+        real_csv = getattr(output_writer, "_csv_writer", None)
+        def half_then_fail(rows, row_cls):
+            def write(f):
+                f.write("source,scraped_at")
+                raise OSError(28, "No space left on device")
+            return write
+        output_writer._csv_writer = half_then_fail
+        try:
+            quiet(finish_run, [Product(sku="2", price=2.0)], out, "both", False,
+                  blocked=False, stop_reason="completed", pages_requested=1,
+                  pages_completed=1, start_url="u", final_url="u")
+            raised = False
+        except OSError:
+            raised = True
+        finally:
+            if real_csv:
+                output_writer._csv_writer = real_csv
+            else:
+                del output_writer._csv_writer
+        after = {ext: open(out + ext, "rb").read() for ext in (".json", ".csv", ".meta.json")}
+        ok &= check("a write that fails mid-CSV raises, and publishes NOTHING "
+                    "(previous JSON, CSV and sidecar byte-identical)",
+                    raised and before == after)
+        ok &= check("...and leaves no temp file behind",
+                    not [n for n in os.listdir(d) if n.endswith(".tmp")])
+        umask = os.umask(0)
+        os.umask(umask)
+        ok &= check("published output keeps the mode a plain open() gives (umask-based)",
+                    os.stat(out + ".json").st_mode & 0o777 == 0o666 & ~umask)
+        priv = os.path.join(d, "dump.html")
+        open(priv, "w").close()
+        os.chmod(priv, 0o644)
+        writer = getattr(output_writer, "write_private_text", None)
+        if writer:
+            writer(priv, "<html>")
+        ok &= check("write_private_text makes even an EXISTING 0644 file 0600",
+                    writer and os.stat(priv).st_mode & 0o777 == 0o600
+                    and open(priv).read() == "<html>")
     seen = set()
     ok &= check("dedupe keeps the first and drops the rest",
                 len(dedupe_by_key([Product(sku="1"), Product(sku="1"), Product(sku=None)], seen)) == 2)
@@ -1258,6 +1376,78 @@ def test_gitignore():
     return ok
 
 
+def test_no_env_read_on_help():
+    """`--help` of every shipped CLI must not open .env.
+
+    Audit follow-up, 2026-09-28: CI and this suite run `--help` for every
+    CLI (ci_checks.py --all), and env_config.py and fingerprint_client.py
+    loaded .env BEFORE parsing argv — so the offline suite read a
+    developer's real credentials on every run, and env_config.py printed its
+    report instead of help. Proved with an audit hook, not by grepping: the
+    CLIs run from a scratch copy beside a canary .env, under a
+    sitecustomize that refuses and records any open() of a .env and any
+    socket use. The copy is what makes this work in CI too, where the repo
+    has no .env for load_env to find.
+    """
+    group("--help reads no .env and opens no socket")
+    ok = True
+    guard = (
+        "import os, sys\n"
+        "LOG = os.environ['KS_GUARD_LOG']\n"
+        "def note(m):\n"
+        "    open(LOG, 'a').write(m + '\\n')\n"
+        "def hook(event, args):\n"
+        "    if event == 'open' and args and isinstance(args[0], (str, bytes, os.PathLike)):\n"
+        "        base = os.path.basename(os.fsdecode(args[0]))\n"
+        "        if base.startswith('.env') and base != '.env.example':\n"
+        "            note('open ' + base); raise PermissionError('guard: .env')\n"
+        "    elif event in ('socket.connect', 'socket.getaddrinfo'):\n"
+        "        note(event); raise PermissionError('guard: network')\n"
+        "sys.addaudithook(hook)\n")
+    sys.path.insert(0, os.path.join(REPO_ROOT, ".github"))
+    try:
+        import ci_checks
+        clis = list(ci_checks.CLIS)
+    finally:
+        sys.path.pop(0)
+    with tempfile.TemporaryDirectory() as d:
+        work, gdir = os.path.join(d, "repo"), os.path.join(d, "guard")
+        os.makedirs(work)
+        os.makedirs(gdir)
+        for name in os.listdir(REPO_ROOT):
+            if name.endswith(".py") or name == ".env.example":
+                with open(os.path.join(REPO_ROOT, name), "rb") as src, \
+                        open(os.path.join(work, name), "wb") as dst:
+                    dst.write(src.read())
+        with open(os.path.join(work, ".env"), "w") as f:
+            f.write("TWOCAPTCHA_KEY=canary0000000000000000000000000000\n")
+        with open(os.path.join(gdir, "sitecustomize.py"), "w") as f:
+            f.write(guard)
+        log = os.path.join(d, "guard.log")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("TWOCAPTCHA_KEY", "KOHLS_CDP_ENDPOINT", "KOHLS_PROXY", "KOHLS_URL")}
+        env.update(PYTHONPATH=gdir, KS_GUARD_LOG=log, PYTHONDONTWRITEBYTECODE="1")
+
+        def run(argv):
+            open(log, "w").close()
+            proc = subprocess.run([sys.executable] + argv, cwd=work, env=env,
+                                  capture_output=True, text=True)
+            return proc, open(log).read().strip()
+
+        proc, hits = run(["-c", "open('.env')"])
+        ok &= check("(the guard itself trips on a .env open)", "open .env" in hits)
+        for cli in clis:
+            proc, hits = run([cli, "--help"])
+            ok &= check("%s --help opens no .env and no socket%s"
+                        % (cli, " (%s)" % hits if hits else ""), not hits)
+            if cli in ("env_config.py", "fingerprint_client.py"):
+                ok &= check("...and answers with usage, exit 0",
+                            proc.returncode == 0 and "usage:" in proc.stdout)
+            ok &= check("...and prints nothing of the canary key",
+                        "canary" not in proc.stdout + proc.stderr)
+    return ok
+
+
 def test_scraper_api_payload():
     group("Scraper API: payload shape and status, with requests stubbed")
     ok = True
@@ -1285,6 +1475,23 @@ def test_scraper_api_payload():
         sac.requests.post = real
     ok &= check("waitFor is an OBJECT, not a JSON string", captured.get("waitFor") == {"text": "catalogData"})
     ok &= check("the target status comes from http_code", status == 403)
+
+    # validate_args directly, not parse_args: parse_args goes on to load .env.
+    import argparse
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "o")
+        good = dict(timeout=60, retries=1, retry_delay=10, out=out)
+        for bad in (dict(timeout=0), dict(timeout=-5), dict(timeout=121),
+                    dict(retries=-1), dict(retry_delay=-1),
+                    dict(out=os.path.join(d, "missing", "o"))):
+            ns = argparse.Namespace(**dict(good, **bad))
+            ok &= check("Scraper API client refuses %s" % bad,
+                        hasattr(sac, "validate_args") and quiet(lambda: _raises_exit(
+                            lambda: sac.validate_args(argparse.ArgumentParser(), ns))))
+        ok &= check("...and accepts the defaults",
+                    hasattr(sac, "validate_args") and not quiet(lambda: _raises_exit(
+                        lambda: sac.validate_args(argparse.ArgumentParser(),
+                                                  argparse.Namespace(**good)))))
     return ok
 
 
@@ -1301,7 +1508,8 @@ def main() -> int:
               test_captcha, test_env_config, test_proxy_and_masking,
               test_fingerprint_helpers, test_wording, test_fixture_corpus_is_scrubbed,
               test_static_analysis, test_shared_calls_bind, test_dockerfile,
-              test_sample_output, test_ci_checks_wired, test_gitignore, test_scraper_api_payload):
+              test_sample_output, test_ci_checks_wired, test_gitignore, test_scraper_api_payload,
+              test_no_env_read_on_help):
         ok &= t()
     ok &= test_engines(skips)
     print()

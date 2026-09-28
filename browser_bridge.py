@@ -39,6 +39,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
@@ -48,7 +49,8 @@ from product_parser import (parse_products, parse_product_detail, SELECTORS,
                             detect_bot_challenge, page_url, page_number_from_url,
                             listing_kind, listing_info, site_host,
                             is_supported_host, HOSTS, unsupported_reason)
-from output_writer import dedupe_by_key, finish_run, EXIT_FETCH_FAILED
+from output_writer import (dedupe_by_key, finish_run, EXIT_FETCH_FAILED,
+                           write_private_text, make_private, output_dir_problem)
 import page_flow
 from page_flow import MIN_CARD_MATCHES, BLOCK_RETRIES_WITHOUT_POOL
 from proxy_pool import (from_args as proxy_pool_from_args, mask, ROTATE_MODES,
@@ -117,6 +119,39 @@ def mask_credentials(text: str) -> str:
     return _CREDENTIALS_IN_URL_RE.sub(r"\1***:***@", text or "")
 
 
+# `key=…` / `token=…` in a query string: the other shape a credential takes
+# inside an exception message. Same pattern as captcha_solver's and
+# fingerprint_client's (see the note in scraper_api_client about unifying
+# the copies).
+_KEY_IN_TEXT_RE = re.compile(
+    r"((?:client)?key|token|api[_-]?key)=([^&\s'\"]{6,})", re.IGNORECASE)
+
+
+def redact(text: str) -> str:
+    """mask_credentials, plus `key=`/`token=` query values. For anything
+    that prints an exception or a traceback."""
+    return _KEY_IN_TEXT_RE.sub(r"\1=***", mask_credentials(text))
+
+
+# Exception types that mean THIS code is wrong, not that the browser or the
+# network failed: a regression after a refactor, a payload shape the parser
+# did not expect. They used to be recorded exactly like a dead browser —
+# `page_error`, exit 5 on page 1 — so an alert said "the page was not
+# obtained" when the code was broken, and the traceback was lost. Now such a
+# run keeps what it gathered (output and sidecar are still written, as
+# partial, stop reason `internal_error`), logs the masked traceback, and
+# exits 1: this family's code for "crashed".
+#
+# Anything else — Playwright's Error, Selenium's WebDriverException, a
+# pyppeteer NetworkError, a RuntimeError from a closed target — keeps the
+# old meaning: the browser died under the run, a transport failure.
+INTERNAL_ERRORS = (AttributeError, TypeError, NameError, KeyError, IndexError,
+                   AssertionError, ZeroDivisionError, ImportError, RecursionError)
+
+# The process exit code for a run that hit an INTERNAL error (see above).
+EXIT_INTERNAL = 1
+
+
 @dataclass
 class PageOutcome:
     """What one page produced.
@@ -124,6 +159,10 @@ class PageOutcome:
     Collected per page and merged afterwards, in page order: dedupe that
     mutates a running set inside the loop makes the OUTPUT depend on arrival
     order, which is wrong the moment pages are fetched concurrently.
+
+    `page_num` is the listing's own page number (the page the URL asks
+    for), not this run's request count: a run started on page 3 fetches
+    pages 3, 4, 5, and its logs, debug dumps and sidecar say so.
     """
     page_num: int
     url: str
@@ -146,6 +185,9 @@ class PageOutcome:
     # An unexpected exception while fetching this page — recorded, masked,
     # so the pages already gathered survive it.
     error: str = ""
+    # "internal" when `error` is one of INTERNAL_ERRORS (a bug here), else
+    # "" — see INTERNAL_ERRORS for what that changes.
+    error_kind: str = ""
     # The listing's own arithmetic, from the page (see listing_info).
     listing: dict = field(default_factory=dict)
 
@@ -231,13 +273,25 @@ def _parse_for_mode(html: str, url: str, args) -> List:
 
 
 def _save_debug(driver, args, page_num: int, html: str) -> str:
+    """Dump the page for diagnosis; return the HTML path ("" if not written).
+
+    Best-effort: a dump that cannot be written must not change what the run
+    reports. It used to raise, so a refused page whose dump failed became
+    "page_error, exit 5" rather than "blocked, exit 3". Written 0600 — see
+    output_writer.write_private_text.
+    """
     debug_html = f"{args.out}_page{page_num}_debug.html"
-    with open(debug_html, "w", encoding="utf-8") as f:
-        f.write(html or "")
     try:
-        driver.screenshot(f"{args.out}_page{page_num}_debug.png")
+        write_private_text(debug_html, html)
+    except OSError as e:
+        logger.warning("Could not write the debug dump %s (%s).", debug_html, e)
+        debug_html = ""
+    png = f"{args.out}_page{page_num}_debug.png"
+    try:
+        driver.screenshot(png)
+        make_private(png)
     except Exception as e:  # noqa: BLE001
-        logger.warning("Could not capture screenshot: %s", e)
+        logger.warning("Could not capture screenshot: %s", redact(str(e))[:200])
     return debug_html
 
 
@@ -257,7 +311,7 @@ def fetch_one_page(driver, args, pool, page_num: int, url: str) -> PageOutcome:
     html, state, status, load_failed = "", "blocked", None, False
 
     for block_attempt in range(block_retries + 1):
-        logger.info("Fetching page %d/%d: %s", page_num, args.pages, url)
+        logger.info("Fetching page %d: %s", page_num, url)
         load_failed, exit_failed = False, ""
         for attempt in range(1, args.retries + 1):
             try:
@@ -365,10 +419,12 @@ def fetch_one_page(driver, args, pool, page_num: int, url: str) -> PageOutcome:
     if args.dump_html:
         dump_path = (args.dump_html if args.pages == 1
                      else f"{args.dump_html}.page{page_num}")
-        with open(dump_path, "w", encoding="utf-8") as f:
-            f.write(html)
-        logger.info("Saved the snapshot the parser sees to %s (%d bytes).",
-                    dump_path, len(html))
+        try:
+            write_private_text(dump_path, html)
+            logger.info("Saved the snapshot the parser sees to %s (%d bytes).",
+                        dump_path, len(html))
+        except OSError as e:
+            logger.warning("Could not write --dump-html to %s (%s).", dump_path, e)
 
     if args.mode == "listing":
         outcome.listing = listing_info(html)
@@ -414,11 +470,24 @@ def fetch_guarded(driver, args, pool, page_num: int, url: str, fetch=None) -> Pa
     start — and letting that propagate threw away every page already
     gathered and exited 1. Recorded instead, message masked, so the run ends
     as the partial run it is (exit 6), or exit 5 if nothing was gathered.
+
+    An exception that means the CODE is wrong (INTERNAL_ERRORS) is recorded
+    the same way — the gathered pages still survive — but marked
+    `error_kind="internal"`, with its masked traceback logged, and the run
+    exits 1 instead of reporting a transport failure.
     """
     try:
         return (fetch or fetch_one_page)(driver, args, pool, page_num, url)
     except Exception as e:  # noqa: BLE001 — recorded, not swallowed
-        message = mask_credentials("%s: %s" % (type(e).__name__, e))[:300]
+        message = redact("%s: %s" % (type(e).__name__, e))[:300]
+        if isinstance(e, INTERNAL_ERRORS):
+            logger.error("Page %d hit an INTERNAL error (%s) — a bug in this "
+                         "scraper, not a failed fetch. Keeping what was "
+                         "gathered; the run will exit %d. Traceback:\n%s",
+                         page_num, message, EXIT_INTERNAL,
+                         redact(traceback.format_exc()))
+            return PageOutcome(page_num=page_num, url=url, load_failed=True,
+                               error=message, error_kind="internal")
         logger.error("Page %d failed unexpectedly (%s) — recording it as a "
                      "failed page and keeping what was gathered.", page_num, message)
         return PageOutcome(page_num=page_num, url=url, load_failed=True, error=message)
@@ -515,6 +584,8 @@ def fetch_pages_concurrently(args, pool, specs, concurrency: int,
 
 
 def _stop_reason_for(outcome: PageOutcome) -> str:
+    if outcome.error_kind == "internal":
+        return "internal_error"
     if outcome.error:
         return "page_error"
     if outcome.load_failed:
@@ -561,12 +632,13 @@ def scrape(args, make_driver: Callable) -> int:
 
     start_page = page_number_from_url(args.url) or 1
     listing_meta: dict = {}
+    unattempted: List[int] = []
 
     driver = make_driver(args, pool, remote=bool(args.cdp_endpoint)).open()
     try:
         # Page 1 of the run is always fetched alone: it states how many pages
         # exist, which decides everything after it.
-        first = fetch_guarded(driver, args, pool, 1, args.url)
+        first = fetch_guarded(driver, args, pool, start_page, args.url)
         outcomes.append(first)
 
         if not first.ok:
@@ -593,13 +665,19 @@ def scrape(args, make_driver: Callable) -> int:
             if urls and concurrency > 1:
                 driver.close()
                 driver = None
-                specs = [(k + 2, u) for k, u in enumerate(urls)]
-                logger.info("Fetching pages 2-%d across %d workers%s.",
-                            planned_pages, concurrency,
+                specs = [(start_page + k + 1, u) for k, u in enumerate(urls)]
+                logger.info("Fetching pages %d-%d across %d workers%s.",
+                            specs[0][0], specs[-1][0], concurrency,
                             f" over {len(pool)} exit(s)" if pool else "")
-                rest, unattempted, exhausted = fetch_pages_concurrently(
+                rest, left, exhausted = fetch_pages_concurrently(
                     args, pool, specs, concurrency, make_driver)
                 outcomes.extend(rest)
+                # Pages left in the queue are missing, unless dispatch stopped
+                # because the listing ENDED — then they lie past its end and
+                # there was nothing to get. (The queue is FIFO in page order,
+                # so everything left is above every page that was taken.)
+                ended = exhausted and not any(o.parsed_nothing for o in rest)
+                unattempted = [] if ended else left
                 failed = [o for o in rest if not o.ok]
                 if failed:
                     worst = min(failed, key=lambda o: o.page_num)
@@ -609,12 +687,12 @@ def scrape(args, make_driver: Callable) -> int:
                     stop_reason = "served_but_unparsed"
                 elif exhausted:
                     stop_reason = "end_of_listing"
-                elif unattempted:
+                elif left:
                     # A worker died before its queue drained. Not "complete".
                     stop_reason = "pages_unattempted"
             else:
                 for k, url in enumerate(urls):
-                    page_num = k + 2
+                    page_num = start_page + k + 1
                     if pool and pool.rotates_per_page():
                         pool.advance(f"per-page rotation, page {page_num}")
                         try:
@@ -655,12 +733,18 @@ def scrape(args, make_driver: Callable) -> int:
         if driver is not None:
             driver.close()
 
-    return merge_and_finish(args, outcomes, blocked, stop_reason, listing_meta)
+    return merge_and_finish(args, outcomes, blocked, stop_reason, listing_meta,
+                            unattempted=unattempted)
 
 
 def merge_and_finish(args, outcomes: List[PageOutcome], blocked: bool,
-                     stop_reason: str, listing_meta: dict) -> int:
-    """Merge outcomes in PAGE order, dedupe, and write through finish_run()."""
+                     stop_reason: str, listing_meta: dict,
+                     unattempted: Optional[List[int]] = None) -> int:
+    """Merge outcomes in PAGE order, dedupe, and write through finish_run().
+
+    An internal error anywhere (see INTERNAL_ERRORS) still writes what was
+    gathered, then turns the exit code into EXIT_INTERNAL.
+    """
     all_rows = []
     merged_seen = set()
     for oc in sorted(outcomes, key=lambda o: o.page_num):
@@ -684,13 +768,24 @@ def merge_and_finish(args, outcomes: List[PageOutcome], blocked: bool,
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url) or args.url
 
-    return finish_run(all_rows, args.out, args.format, args.allow_empty,
-                      blocked=blocked, stop_reason=stop_reason,
-                      pages_requested=args.pages, pages_completed=len(ok_pages),
-                      pages_failed=failed_pages, mode=args.mode,
-                      source=site_host(final_url) or site_host(args.url),
-                      start_url=args.url, final_url=final_url,
-                      listing=listing_meta)
+    internal = [o.page_num for o in outcomes if o.error_kind == "internal"]
+    if internal:
+        stop_reason = "internal_error"
+    rc = finish_run(all_rows, args.out, args.format, args.allow_empty,
+                    blocked=blocked, stop_reason=stop_reason,
+                    pages_requested=args.pages, pages_completed=len(ok_pages),
+                    pages_failed=failed_pages, pages_unattempted=unattempted,
+                    mode=args.mode,
+                    source=site_host(final_url) or site_host(args.url),
+                    start_url=args.url, final_url=final_url,
+                    listing=listing_meta)
+    if internal:
+        logger.error("Internal error on page(s) %s — exit %d, not %d: this is a "
+                     "bug in the scraper, not a statement about the site. "
+                     "Please report it with the traceback above.",
+                     ", ".join(map(str, internal)), EXIT_INTERNAL, rc)
+        return EXIT_INTERNAL
+    return rc
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +915,11 @@ def validate_args(p: argparse.ArgumentParser, args) -> None:
         p.error("--proxy-block-retries cannot be negative")
     if args.delay < 0 or args.retry_delay < 0:
         p.error("--delay and --retry-delay cannot be negative")
+    problem = output_dir_problem(args.out)
+    if problem:
+        p.error(f"{problem} — create it first (checked before the browser "
+                f"starts, so no page is fetched and paid for only to fail "
+                f"at the write).")
     kind = listing_kind(args.url)
     if args.mode != "listing" and args.pages != 1:
         logger.warning("--pages %d is ignored in --mode %s: there is one page "
