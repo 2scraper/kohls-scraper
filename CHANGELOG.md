@@ -8,6 +8,8 @@ frozen — a patch that changes a default says so at the top of its entry.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-15
+
 > **Behaviour changes.** A page that was served with its listing and parsed
 > to zero rows (`served_but_unparsed`) now exits **5**, not 4: exit 4 means
 > the catalogue is empty, and this is a parser failure. A page now buys at
