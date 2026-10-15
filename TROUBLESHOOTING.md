@@ -10,7 +10,7 @@ exit code: it says which of these you are in.
 | 2 | bad usage (the message says what) | [Usage errors](#usage-errors) |
 | 3 | refused or challenged | [Exit 3](#exit-3-refused) |
 | 4 | the site answered, and the answer was "no products" | [Exit 4](#exit-4-no-products) |
-| 5 | the page was never obtained | [Exit 5](#exit-5-never-obtained) |
+| 5 | the page was never obtained, or was served and parsed to nothing | [Exit 5](#exit-5-never-obtained) |
 | 6 | some pages gathered, then the run stopped | [Exit 6](#exit-6-partial) |
 | 1 | a crash — please report it | [Crashes](#crashes) |
 
@@ -62,6 +62,12 @@ filter, e.g. `?CN=Gender:Womens+Department:Clothing`.
 the empty files if your pipeline wants them.
 
 ## Exit 5: never obtained
+
+**`The page was served and parsed to 0 rows (served_but_unparsed)`** — the
+page arrived and held the listing, and this parser read nothing from it.
+That is a parser problem, not an empty catalogue: re-run with `--dump-html`
+and report it with the file. (A listing that genuinely holds no products is
+exit 4.) Until 2026-10-15 this case exited 4.
 
 **`could not connect to --cdp-endpoint … 500`** — a Scraping Browser profile
 allows ONE live connection at a time, and the previous run's may not have

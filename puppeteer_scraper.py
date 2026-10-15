@@ -185,7 +185,7 @@ class PuppeteerDriver:
         if self.pool:
             scrubbed, credentials = split_credentials(self.pool.current)
             # The address on the command line, the credentials through
-            # page.authenticate(): argv is readable by anything that runs `ps`.
+            # _install_proxy_auth(): argv is readable by anything that runs `ps`.
             launch_args.append(f"--proxy-server={scrubbed}")
             logger.info("Using proxy exit %s", mask(self.pool.current))
         # handleSIGINT/TERM/HUP off: pyppeteer installs signal handlers inside
@@ -211,10 +211,62 @@ class PuppeteerDriver:
             ) from None
         self.page = self.bridge.run(self.browser.newPage())
         if credentials:
-            self.bridge.run(self.page.authenticate(
-                {"username": credentials[0], "password": credentials[1]}))
+            self._install_proxy_auth(*credentials)
         if self.args.fingerprint:
             self._apply_fingerprint()
+
+    def _install_proxy_auth(self, username: str, password: str):
+        """Answer the proxy's auth challenge.
+
+        `page.authenticate` works on the old Chromium pyppeteer bundles but
+        relies on Network.setRequestInterception, which current Chromium no
+        longer has: a sibling repo measured it on 2026-10-05 dying with
+        "Protocol error (Network.setRequestInterception): ... wasn't found"
+        before the first navigation, an uncaught traceback, under
+        --chromium-path at Chromium 153. So it is tried first, and only that
+        one error falls back to CDP's Fetch domain with `handleAuthRequests`,
+        which is what Playwright uses. Anything else propagates. Not yet run
+        through an authenticated proxy on kohls.com.
+
+        The fallback pauses every request and continues it unchanged; only an
+        auth challenge whose source is the PROXY is answered, with
+        credentials that never leave this process's memory.
+        """
+        try:
+            self.bridge.run(self.page.authenticate(
+                {"username": username, "password": password}))
+            return
+        except Exception as e:  # noqa: BLE001 - pyppeteer raises several types
+            if "setRequestInterception" not in str(e):
+                raise
+            logger.info("page.authenticate is not available on this Chromium "
+                        "-- answering the proxy through CDP Fetch instead "
+                        "(slower: every request is paused and continued).")
+
+        async def _enable():
+            session = await self.page.target.createCDPSession()
+
+            def _paused(event):
+                asyncio.ensure_future(session.send(
+                    "Fetch.continueRequest", {"requestId": event["requestId"]}))
+
+            def _auth(event):
+                source = (event.get("authChallenge") or {}).get("source")
+                response = ({"response": "ProvideCredentials",
+                             "username": username, "password": password}
+                            if source == "Proxy" else {"response": "Default"})
+                asyncio.ensure_future(session.send(
+                    "Fetch.continueWithAuth",
+                    {"requestId": event["requestId"],
+                     "authChallengeResponse": response}))
+
+            session.on("Fetch.requestPaused", _paused)
+            session.on("Fetch.authRequired", _auth)
+            await session.send("Fetch.enable", {"handleAuthRequests": True,
+                                                "patterns": [{"urlPattern": "*"}]})
+            return session
+
+        self._auth_session = self.bridge.run(_enable(), timeout=30)
 
     def _apply_fingerprint(self):
         from fingerprint_client import get_fingerprint, cdp_identity_commands

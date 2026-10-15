@@ -202,7 +202,8 @@ command line, where `ps` and your shell history would keep them.
 
 `0` ok · `1` crash · `2` bad usage · `3` refused or challenged · `4` the site
 answered with no products · `5` the page was never obtained (a dead proxy, a
-blank document, a timeout, a CDP connection refused, a remote API failing) ·
+blank document, a timeout, a CDP connection refused, a remote API failing),
+or it was served and this parser read no rows from it ·
 `6` partial. A run that gathers nothing writes nothing, so last night's good
 file is never replaced by an empty one — and every file is written to a
 temporary name and renamed into place, so a run killed mid-write cannot
@@ -215,7 +216,7 @@ reason `internal_error`, and the log carries the masked traceback.
 | Script | Engine | Scraping Browser API | Authenticated proxy |
 |---|---|---|---|
 | `playwright_scraper.py` | Playwright (recommended) | yes | yes |
-| `puppeteer_scraper.py` | pyppeteer | yes | yes (`page.authenticate`) |
+| `puppeteer_scraper.py` | pyppeteer | yes | yes (`page.authenticate`, falling back to CDP `Fetch.authRequired` on a Chromium that lacks it; not yet run through an authenticated proxy here) |
 | `selenium_scraper.py` | Selenium | **no** — chromedriver's `debuggerAddress` has nowhere to put a password; refused with exit 2 | **no** — credentials are stripped, with a warning |
 | `scraper_api_client.py` | none (2Captcha Scraper API) | via `--use-cdp` | — |
 

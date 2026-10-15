@@ -20,8 +20,9 @@ listing: `productCount`, `totalPages`, `limit`, and `currentPage`, the page
 the SERVER actually answered with. That island is the primary source here.
 
 JSON-LD is present and is NOT the primary source, and the reason is the
-trap §24 of the family template describes. Every listing page carries exactly
-one `application/ld+json` block, a `CollectionPage` whose `ItemList` holds
+trap of a structured block that is valid and about the wrong products.
+Every listing page carries exactly one
+`application/ld+json` block, a `CollectionPage` whose `ItemList` holds
 FIFTEEN items against the page's 120 — measured on eleven live listing
 captures, all fifteen, every time, and always the first fifteen payload
 entries INCLUDING sponsored ones. A JSON-LD-first parser would return 15 rows
@@ -124,7 +125,7 @@ SELECTORS = {
 # The numeric id, and ONLY the numeric one. The same page links to "outfit"
 # collections as /product/prd-c2435951/… — the same URL shape with a letter in
 # front of the number, matched by the selector above and describing no single
-# product. They are the "junk link" §4 of the family template warns about: in
+# product. They are "junk links": in
 # the fallback path they would become rows with a plausible title and a
 # neighbour's price.
 _SKU_IN_URL_RE = re.compile(r"/product/prd-(\d+)(?=[/.?#]|$)")
@@ -338,7 +339,7 @@ def detect_page_state(html: str, status: Optional[int] = None,
     """One of "content", "empty", "end", "blocked", "challenge", "captcha",
     "unloaded".
 
-    Ordered by how much each signal PROVES, not by how cheap it is (§17):
+    Ordered by how much each signal PROVES, not by how cheap it is:
 
       1. the site's structured data — content, or an honestly empty listing
          (only a served page carries the island or the product model);
@@ -357,8 +358,8 @@ def detect_page_state(html: str, status: Optional[int] = None,
         return "unloaded"
     # The site's own structured data first: a page carrying the listing
     # island or the product model was SERVED, whatever strings it also holds
-    # — a marker may only refine the reason for a page already given up on
-    # (§18), never overrule the data. No refusal capture carries either.
+    # — a marker may only refine the reason for a page already given up on,
+    # never overrule the data. No refusal capture carries either.
     data = catalog_data(html)
     if data is not None:
         products = data.get("products") or []
@@ -780,7 +781,7 @@ def _parse_url_fallback(html: str, base_url: str, label: Optional[str]) -> List[
     soup = BeautifulSoup(html or "", "html.parser")
     # The page's JSON-LD first. Failing that, the host's currency — and that
     # is the "$" the tile itself prints (every amount this path reads is
-    # matched with its "$"), read as USD on a US-only shop: §4's bare-symbol
+    # matched with its "$"), read as USD on a US-only shop: the bare-symbol
     # tier, a guess the site's own symbol supports, not a compiled default.
     currency = page_currency(html) or host_currency(base_url)
     page = page_number_from_url(base_url)
