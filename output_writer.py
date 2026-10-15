@@ -29,6 +29,7 @@ gets the right header for the mode that produced it.
 import csv
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime, timezone
@@ -194,6 +195,24 @@ def _csv_value(v: Any) -> Any:
     return v
 
 
+# A spreadsheet opening the CSV executes a cell that begins with one of these
+# as a formula, and every string in these rows was written by whoever wrote
+# the listing, not by us. Such a cell gets a leading apostrophe in the CSV
+# only; the JSON keeps the site's exact bytes. Only STRINGS are touched (a
+# numeric -5 stays a number, so sums over the column still work), and the
+# check runs AFTER list serialisation, because a joined list is text too and
+# its first element can be formula-shaped.
+CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r", "\n")
+CSV_FORMULA_ESCAPE = "'"
+
+
+def _csv_escape(v: Any) -> Tuple[Any, bool]:
+    """Neutralise a formula-shaped cell. Returns (value, was_escaped)."""
+    if isinstance(v, str) and v.startswith(CSV_FORMULA_LEADS):
+        return CSV_FORMULA_ESCAPE + v, True
+    return v, False
+
+
 # ---------------------------------------------------------------------------
 # Atomic publication
 # ---------------------------------------------------------------------------
@@ -216,6 +235,20 @@ _UMASK = os.umask(0)
 os.umask(_UMASK)
 
 
+def _target_mode(path: str) -> int:
+    """The mode the published file should have.
+
+    An existing file keeps its own mode (a 0640 output stays 0640 across
+    runs); a new one gets what a plain open() would give it under the
+    current umask. Never a flat value: a fixed 0644 would narrow a 0664
+    file under umask 002, and mkstemp's 0600 would hide it from the group.
+    """
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return 0o666 & ~_UMASK
+
+
 def _stage(path: str, write: Callable[[Any], None], newline: Optional[str] = None) -> str:
     """Write via `write(fileobj)` to a temp file beside `path`; return its path."""
     directory = os.path.dirname(os.path.abspath(path))
@@ -227,7 +260,7 @@ def _stage(path: str, write: Callable[[Any], None], newline: Optional[str] = Non
             write(f)
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(tmp, 0o666 & ~_UMASK)
+        os.chmod(tmp, _target_mode(path))
     except BaseException:
         _discard([(tmp, path)])
         raise
@@ -252,7 +285,8 @@ def _json_writer(rows: Sequence[Any]) -> Callable[[Any], None]:
     return lambda f: json.dump([asdict(r) for r in rows], f, ensure_ascii=False, indent=2)
 
 
-def _csv_writer(rows: Sequence[Any], row_cls: Type) -> Callable[[Any], None]:
+def _csv_writer(rows: Sequence[Any], row_cls: Type,
+                counter: Optional[List[int]] = None) -> Callable[[Any], None]:
     # An empty result still gets the header row. A zero-byte file makes a
     # consumer fail on read (no columns to parse) instead of reading a valid
     # table with zero rows — and "an empty result is still a well-formed
@@ -262,11 +296,20 @@ def _csv_writer(rows: Sequence[Any], row_cls: Type) -> Callable[[Any], None]:
     # run still writes the columns of the mode that produced it.
     fieldnames = [f.name for f in fields(row_cls)]
 
+    # `counter`, when given, receives how many cells were formula-escaped,
+    # so the sidecar can declare that the CSV and the JSON differ there.
     def write(f):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
+        escaped = 0
         for r in rows:
-            writer.writerow({k: _csv_value(v) for k, v in asdict(r).items()})
+            out = {}
+            for k, v in asdict(r).items():
+                out[k], was = _csv_escape(_csv_value(v))
+                escaped += was
+            writer.writerow(out)
+        if counter is not None:
+            counter.append(escaped)
     return write
 
 
@@ -494,8 +537,12 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 
 
 def _stage_rows(rows: Sequence[Any], out_prefix: str, fmt: str,
-                allow_empty: bool, row_cls: Type) -> Tuple[int, List[Tuple[str, str]]]:
-    """Stage the row files `save` would write; return (exit code, staged pairs)."""
+                allow_empty: bool, row_cls: Type,
+                csv_escaped: Optional[List[int]] = None) -> Tuple[int, List[Tuple[str, str]]]:
+    """Stage the row files `save` would write; return (exit code, staged pairs).
+
+    `csv_escaped`, when given, receives the CSV's formula-escaped cell count.
+    """
     if not rows and not allow_empty:
         print(f"[!] 0 products — refusing to write {out_prefix}.json/.csv, so an "
               f"earlier good result isn't overwritten with an empty one. "
@@ -509,7 +556,8 @@ def _stage_rows(rows: Sequence[Any], out_prefix: str, fmt: str,
             staged.append((_stage(path, _json_writer(rows)), path))
         if fmt in ("csv", "both"):
             path = f"{out_prefix}.csv"
-            staged.append((_stage(path, _csv_writer(rows, row_cls), newline=""), path))
+            staged.append((_stage(path, _csv_writer(rows, row_cls, csv_escaped),
+                                  newline=""), path))
     except BaseException:
         _discard(staged)
         raise
@@ -543,10 +591,13 @@ COMPLETE_STOP_REASONS = ("completed", "end_of_listing", "no_new_products",
 
 # A page the site SERVED — the listing island was there, or product links
 # were — that parsed to zero rows. That is this parser's fault, not the
-# catalogue's (§20), so it has its own stop reason and is NOT complete:
-# mid-run it makes the run partial (exit 6). With nothing gathered at all it
-# keeps the "no products" exit (4) rather than 5, because the page was
-# obtained; the stop reason is what names whose problem it is.
+# catalogue's, so it has its own stop reason and is NOT complete: mid-run it
+# makes the run partial (exit 6), and with nothing gathered at all it is
+# exit 5, not 4. Exit 4 states a fact about the catalogue ("the answer was
+# nothing"), and here the page itself said there were products: a genuinely
+# empty listing is classified "empty" before parsing and never lands here.
+# Until 2026-10-15 this exited 4, which told a pipeline the listing was
+# empty when the rows were there and unread.
 PARSER_STOP_REASONS = ("served_but_unparsed",)
 
 
@@ -590,7 +641,8 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     complete = (stop_reason in COMPLETE_STOP_REASONS and not pages_failed
                 and not pages_unattempted)
     row_cls = ROW_CLASS_BY_MODE.get(mode, Product)
-    rc, staged = _stage_rows(rows, out_prefix, fmt, allow_empty, row_cls)
+    csv_escaped: List[int] = []
+    rc, staged = _stage_rows(rows, out_prefix, fmt, allow_empty, row_cls, csv_escaped)
     wrote_output = bool(rows) or allow_empty
 
     if wrote_output:
@@ -603,6 +655,15 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             outputs=[os.path.basename(final) for _, final in staged],
             mode=mode, source=source, listing=listing,
             start_url=start_url, final_url=final_url, products=len(rows))
+        if csv_escaped:
+            # Merged UNDER the run's own keys: housekeeping never overwrites
+            # a field the run recorded.
+            meta = {"csv_cells_escaped": csv_escaped[0], **meta}
+            if csv_escaped[0]:
+                print(f"[!] {csv_escaped[0]} CSV cell(s) began with a formula "
+                      f"character and were prefixed with "
+                      f"{CSV_FORMULA_ESCAPE!r} in the CSV only; the JSON is "
+                      f"unchanged — see csv_cells_escaped in the sidecar.")
         meta_path = _meta_path(out_prefix)
         try:
             staged.append((_stage(meta_path, _meta_writer(meta)), meta_path))
@@ -631,10 +692,10 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             return EXIT_BLOCKED
         if stop_reason in PARSER_STOP_REASONS:
             print(f"[!] The page was served and parsed to 0 rows "
-                  f"({stop_reason}) — exit {EXIT_NO_PRODUCTS}, and this is the "
-                  f"PARSER's problem, not an empty catalogue. Re-run with "
-                  f"--dump-html and report it.")
-            return EXIT_NO_PRODUCTS
+                  f"({stop_reason}) — exit {EXIT_FETCH_FAILED}, NOT an empty "
+                  f"catalogue (exit {EXIT_NO_PRODUCTS}): this is the PARSER's "
+                  f"problem. Re-run with --dump-html and report it.")
+            return EXIT_FETCH_FAILED
         if not complete:
             print(f"[!] Nothing was gathered and the run did not finish "
                   f"({stop_reason}) — exit {EXIT_FETCH_FAILED}, NOT an empty "

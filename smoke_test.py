@@ -430,7 +430,7 @@ def test_page_flow():
         raise RuntimeError("navigated")
     ok &= check("a count that raises mid-navigation is polled, not fatal",
                 page_flow.wait_for_count(boom, lambda ms: None, "x", 1, 0) == 0)
-    # A policy constant nothing reads is dead code (§17): grep the consumer.
+    # A policy constant nothing reads is dead code: grep the consumer.
     tree = ast.parse(open(os.path.join(REPO_ROOT, "browser_bridge.py"), encoding="utf-8").read())
     loads = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
     for const in ("BLOCK_RETRIES_WITHOUT_POOL", "MIN_CARD_MATCHES"):
@@ -671,9 +671,13 @@ def test_whole_run():
     rc, meta, rows = _run(["--url", url4, "--pages", "3"], {1: (200, s4), 2: (200, unparsed)})
     ok &= check("a SERVED page 2 that parses to nothing: partial (exit 6), named, not 'complete'",
                 rc == EXIT_PARTIAL and meta["stop_reason"] == "served_but_unparsed")
+    # This pinned exit 4 until 2026-10-15. Exit 4 says the CATALOGUE is
+    # empty, and a page whose listing was served and parsed to nothing says
+    # the opposite; a genuinely empty listing is classified "empty" before
+    # parsing and keeps exit 4 (checked above).
     rc, meta, rows = _run(["--url", url4], {1: (200, unparsed)})
-    ok &= check("...on page 1: exit 4 (the page was obtained), with its own reason in the log",
-                rc == EXIT_NO_PRODUCTS)
+    ok &= check("...on page 1: exit 5 (a parser failure, NOT an empty catalogue)",
+                rc == EXIT_FETCH_FAILED)
     rc, meta, rows = _run(["--url", url4, "--pages", "2"], {1: (200, s4), 2: (None, end)})
     ok &= check("a past-the-end page with NO status (Selenium) and the asked URL: end_of_listing",
                 rc == 0 and meta["stop_reason"] == "end_of_listing" and meta["pages_completed"] == 1
@@ -791,7 +795,7 @@ def test_output_contract():
         before = {ext: open(out + ext, "rb").read() for ext in (".json", ".csv", ".meta.json")}
         import output_writer
         real_csv = getattr(output_writer, "_csv_writer", None)
-        def half_then_fail(rows, row_cls):
+        def half_then_fail(rows, row_cls, *rest):
             def write(f):
                 f.write("source,scraped_at")
                 raise OSError(28, "No space left on device")
@@ -871,7 +875,7 @@ def test_captcha():
     for name in ("listing_sort4_p1", "detail_croft_tee", "search_crocs_p1"):
         ok &= check("%s: the static detector stays quiet despite the injected "
                     "recaptcha hunter scripts" % name, detect_recaptcha_v3(*fx(name)) is None)
-    # §23: a cap nothing enforces is a bill. One call site per attempt.
+    # A cap nothing enforces is a bill. One call site per attempt.
     src = open(os.path.join(REPO_ROOT, "browser_bridge.py"), encoding="utf-8").read()
     calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call)
              and getattr(n.func, "id", None) == "handle_captcha_if_present"]
@@ -1111,7 +1115,7 @@ def test_wording():
         offenders = [os.path.relpath(f, REPO_ROOT) for f in files
                      if phrase.lower() in open(f, encoding="utf-8", errors="replace").read().lower()]
         ok &= check("no shipped file says %r %s" % (phrase, offenders or ""), not offenders)
-    # §19: never claim a captcha is beyond solving — only that this repo
+    # Never claim a captcha is beyond solving — only that this repo
     # does not implement a solver for it.
     claim = re.compile(r"\b(?:un" + r"solvable|can" + r"not\s+be\s+solved|can't\s+be\s+solved)\b", re.I)
     offenders = [os.path.relpath(f, REPO_ROOT) for f in files
@@ -1170,7 +1174,7 @@ def _undefined_names(path):
 
 
 def _unreachable(path):
-    """Statements after return/raise/break/continue in the same block (§22)."""
+    """Statements after return/raise/break/continue in the same block."""
     tree = ast.parse(open(path, encoding="utf-8").read())
     found = []
     for node in ast.walk(tree):
@@ -1334,7 +1338,7 @@ def test_ci_checks_wired():
     gh = os.path.join(REPO_ROOT, ".github")
     if not os.path.isdir(gh):
         # The Docker image deliberately carries no .github; the escape is the
-        # WHOLE directory being absent, never one file inside it (§22).
+        # WHOLE directory being absent, never one file inside it.
         print("  (no .github directory here — skipping, as the image build does)")
         return ok
     script = os.path.join(gh, "ci_checks.py")
@@ -1371,7 +1375,7 @@ def test_gitignore():
         ok &= check("%s is committed, not ignored" % path, not ignored(path))
     for path in (".env", ".env.bak", ".env.local", "live/page.html", "out/run.json",
                  "runs/x_page1_debug.html", "dump.page3", "kohls_products.json",
-                 "foo_page1_debug.png"):
+                 "foo_page1_debug.png", "page.html"):
         ok &= check("%s is ignored" % path, ignored(path))
     return ok
 
@@ -1495,6 +1499,283 @@ def test_scraper_api_payload():
     return ok
 
 
+# ---------------------------------------------------------------------------
+# Family rules added 2026-10-15
+# ---------------------------------------------------------------------------
+def test_csv_formula_guard():
+    group("CSV formula cells are neutralised in the CSV only")
+    ok = True
+    import csv as _csv
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "o")
+        rows = [Product(sku="1", title='=HYPERLINK("http://x","y")', price=-5.0,
+                        url="https://www.kohls.com/product/prd-1/x.jsp"),
+                Product(sku="2", title="@cmd", price=3.0),
+                Product(sku="3", title="plain", price=4.0)]
+        list_field = next((f.name for f in fields(Product)
+                           if f.name not in ("title",) and isinstance(
+                               getattr(Product(), f.name), list)), None)
+        if list_field:
+            setattr(rows[2], list_field, ["+1 formula", "b"])
+        rc = quiet(finish_run, rows, out, "both", False, blocked=False,
+                   stop_reason="completed", pages_requested=1, pages_completed=1,
+                   start_url="u", final_url="u")
+        got = list(_csv.DictReader(open(out + ".csv", newline="", encoding="utf-8")))
+        meta = json.load(open(out + ".meta.json"))
+        js = json.load(open(out + ".json"))
+        ok &= check("a formula-shaped title gets a leading apostrophe in the CSV",
+                    rc == 0 and got[0]["title"] == "'" + rows[0].title
+                    and got[1]["title"] == "'@cmd" and got[2]["title"] == "plain")
+        ok &= check("a negative NUMBER is left a number", got[0]["price"] == "-5.0")
+        if list_field:
+            ok &= check("a joined list cell is escaped after serialisation (%s)" % list_field,
+                        got[2][list_field].startswith("'+1 formula"))
+        import output_writer as _ow
+        ok &= check("a list is escaped AFTER it is joined into one cell",
+                    _ow._csv_escape(_ow._csv_value(["+1 formula", "b"]))[0]
+                    == "'+1 formula | b")
+        ok &= check("the JSON keeps the site's exact text",
+                    js[0]["title"] == rows[0].title and js[1]["title"] == "@cmd")
+        expected = 2 + (1 if list_field else 0)
+        ok &= check("the sidecar declares csv_cells_escaped (%s)"
+                    % meta.get("csv_cells_escaped"), meta.get("csv_cells_escaped") == expected)
+        ok &= check("csv_cells_escaped sits UNDER the run's own keys (status etc. intact)",
+                    meta.get("status") == "complete" and meta.get("products") == 3)
+    return ok
+
+
+def test_output_modes():
+    group("published files keep an existing mode, and new ones follow the umask")
+    ok = True
+    if os.name != "posix":
+        return ok
+    import output_writer
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "o")
+        good = [Product(sku="1", price=1.0)]
+        quiet(save, good, out, "both")
+        os.chmod(out + ".json", 0o640)
+        quiet(save, good, out, "both")
+        ok &= check("an existing 0640 output stays 0640 after a rewrite",
+                    (os.stat(out + ".json").st_mode & 0o777) == 0o640)
+        # The writer reads the umask once at import; set both the process
+        # umask and that cached value to a NON-default 002, the case where a
+        # flat 0644 and the right rule disagree.
+        old, cached = os.umask(0o002), output_writer._UMASK
+        output_writer._UMASK = 0o002
+        try:
+            quiet(save, good, os.path.join(d, "n"), "json")
+            mode = os.stat(os.path.join(d, "n.json")).st_mode & 0o777
+        finally:
+            os.umask(old)
+            output_writer._UMASK = cached
+        ok &= check("a NEW file under umask 002 is 0664, not a flat 0644 or 0600 (%o)" % mode,
+                    mode == 0o664)
+    return ok
+
+
+def test_solve_budget():
+    group("paid solves: one per page, whatever the retries and rotations")
+    ok = True
+    html, _ = fx("signin_recaptcha")
+    _, url = fx("listing_sort4_p1")
+    ok &= check("(the reCAPTCHA fixture classifies as a retryable challenge)",
+                page_flow.should_retry(page_flow.classify(html, status=200, url=url)))
+    calls = []
+    real = browser_bridge.solve_recaptcha
+
+    def fake_solve(*a, **kw):
+        calls.append(1)
+        return "token"
+    browser_bridge.solve_recaptcha = fake_solve
+    try:
+        with tempfile.TemporaryDirectory() as pd:
+            plist = os.path.join(pd, "proxies.txt")
+            with open(plist, "w") as f:
+                f.write("".join("http://10.0.0.%d:8000\n" % i for i in range(1, 7)))
+            for label, extra in (("no pool", []),
+                                 ("6 exits, --proxy-block-retries 5",
+                                  ["--proxy-file", plist, "--proxy-block-retries", "5"])):
+                del calls[:]
+                rc, _, _ = _run(["--url", url, "--twocaptcha-key", "k" * 8] + extra,
+                                {1: (200, html)})
+                ok &= check("%s: exactly %d solve bought for one page (got %d), exit 3"
+                            % (label, page_flow.SOLVES_PER_PAGE, len(calls)),
+                            len(calls) == page_flow.SOLVES_PER_PAGE and rc == EXIT_BLOCKED)
+    finally:
+        browser_bridge.solve_recaptcha = real
+    src = open(os.path.join(REPO_ROOT, "browser_bridge.py"), encoding="utf-8").read()
+    ok &= check("the budget is checked BEFORE the solver is called",
+                0 < src.find("budget.allows()") < src.find("token = solve_recaptcha("))
+    return ok
+
+
+# Assembled from pieces so this file does not match itself.
+_PRIVATE_CITATIONS = re.compile(
+    "|".join([re.escape("CLAUDE" + ".md"), "claude_" + "2scraper",
+              "2scraper_" + "repo_rules", "play" + "book",
+              "family " + "template", "\u00a7"]), re.I)
+
+
+def test_no_private_citations():
+    group("no citations of private instruction files")
+    ok = True
+    if os.path.isdir(os.path.join(REPO_ROOT, ".git")):
+        listed = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT, capture_output=True,
+                                text=True).stdout.split()
+        files = [os.path.join(REPO_ROOT, f) for f in listed]
+    else:
+        files = _shipped_text_files()
+    offenders = []
+    for path in files:
+        try:
+            text = open(path, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if _PRIVATE_CITATIONS.search(text):
+            offenders.append(os.path.relpath(path, REPO_ROOT))
+    ok &= check("no tracked file cites a private file or section number %s"
+                % (offenders or ""), files and not offenders)
+    return ok
+
+
+def test_canary_assert():
+    group("the canary's assertions fail on a refusal, a never-obtained page and zero rows")
+    ok = True
+    path = os.path.join(REPO_ROOT, ".github", "canary_assert.py")
+    if not os.path.isdir(os.path.join(REPO_ROOT, ".github")):
+        print("  (no .github directory here — skipping, as the image build does)")
+        return ok
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("canary_assert", path)
+    ca = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ca)
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "canary")
+        rows = [dict(asdict(Product(sku=str(i), title="t", price=1.0, currency="USD",
+                                    url="https://www.kohls.com/product/prd-%d/x.jsp" % i)),
+                     page=1 + i // 120, position=1 + i % 120) for i in range(337)]
+        json.dump(rows, open(prefix + ".json", "w"))
+        meta = {"status": "complete", "pages_completed": 3,
+                "listing": {"total_results": 337, "pages_available": 3, "per_page": 120}}
+        json.dump(meta, open(prefix + ".meta.json", "w"))
+        ok &= check("a good run passes", all(ca.checks(prefix, 0).values()))
+        for rc in (3, 4, 5):
+            ok &= check("exit %d is red" % rc, not all(ca.checks(prefix, rc).values()))
+        json.dump(rows[:150], open(prefix + ".json", "w"))
+        ok &= check("a parser that loses half the rows is red",
+                    not all(ca.checks(prefix, 0).values()))
+        json.dump(rows[:240], open(prefix + ".json", "w"))
+        json.dump(dict(meta, pages_completed=2, listing={"total_results": 240,
+                       "pages_available": 2, "per_page": 120}), open(prefix + ".meta.json", "w"))
+        ok &= check("a SMALLER brand (2 pages, 240 rows) is not a failure",
+                    all(ca.checks(prefix, 0).values()))
+        os.remove(prefix + ".json")
+        ok &= check("no rows at all is red", not all(ca.checks(prefix, 0).values()))
+    wf = open(os.path.join(REPO_ROOT, ".github", "workflows", "canary.yml"), encoding="utf-8").read()
+    ok &= check("the canary fails, not skips, without KOHLS_CDP_ENDPOINT",
+                "::error::Missing secret KOHLS_CDP_ENDPOINT" in wf and "::notice::" not in wf)
+    ok &= check("the canary runs these assertions", "canary_assert.py" in wf)
+    return ok
+
+
+def test_pyppeteer_proxy_auth():
+    """page.authenticate needs Network.setRequestInterception, which current
+    Chromium no longer has (measured in a sibling repo on 2026-10-05: exit 1
+    and a traceback before the first navigation). Only that error falls back
+    to CDP Fetch; only a PROXY challenge gets the credentials."""
+    group("pyppeteer: proxy auth falls back to CDP Fetch")
+    ok = True
+    try:
+        module = importlib.import_module("puppeteer_scraper")
+    except ImportError:
+        print("  (pyppeteer absent — covered in its engine-smoke venv)")
+        return ok
+    import asyncio
+
+    class FakeSession:
+        def __init__(self):
+            self.sent, self.handlers = [], {}
+
+        def on(self, name, fn):
+            self.handlers[name] = fn
+
+        async def send(self, method, params=None):
+            self.sent.append((method, params or {}))
+
+    def make(authenticate_error):
+        sess = FakeSession()
+
+        class Target:
+            async def createCDPSession(self_inner):
+                return sess
+
+        class Page:
+            target = Target()
+            calls = 0
+
+            async def authenticate(self_inner, creds):
+                Page.calls += 1
+                if authenticate_error is not None:
+                    raise authenticate_error
+
+        class Bridge:
+            def run(self_inner, coro, timeout=None):
+                return asyncio.new_event_loop().run_until_complete(coro)
+
+        obj = object.__new__(module.PuppeteerDriver)
+        obj.page, obj.bridge = Page(), Bridge()
+        return obj, Page, sess
+
+    def attempt(fn):
+        try:
+            fn()
+            return None
+        except Exception as exc:  # noqa: BLE001
+            return exc
+
+    obj, Page, sess = make(None)
+    err = attempt(lambda: obj._install_proxy_auth("u", "p"))
+    ok &= check("a Chromium with page.authenticate uses it and nothing else",
+                err is None and Page.calls == 1 and not sess.sent)
+    missing = Exception("Protocol error (Network.setRequestInterception): "
+                        "'Network.setRequestInterception' wasn't found")
+    obj, Page, sess = make(missing)
+    err = attempt(lambda: obj._install_proxy_auth("u", "p"))
+    ok &= check("setRequestInterception missing falls back instead of raising", err is None)
+    enable = [p for m, p in sess.sent if m == "Fetch.enable"]
+    ok &= check("and enables Fetch with handleAuthRequests",
+                len(enable) == 1 and enable[0].get("handleAuthRequests") is True)
+
+    async def drive():
+        def fire(name, event):
+            handler = sess.handlers.get(name)
+            if handler is not None:
+                handler(event)
+        fire("Fetch.authRequired", {"requestId": "r1", "authChallenge": {"source": "Proxy"}})
+        fire("Fetch.authRequired", {"requestId": "r2", "authChallenge": {"source": "Server"}})
+        fire("Fetch.requestPaused", {"requestId": "r3"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    asyncio.new_event_loop().run_until_complete(drive())
+    auth = {p["requestId"]: p["authChallengeResponse"]
+            for m, p in sess.sent if m == "Fetch.continueWithAuth"}
+    ok &= check("a PROXY challenge is answered with the credentials",
+                auth.get("r1") == {"response": "ProvideCredentials",
+                                   "username": "u", "password": "p"})
+    ok &= check("a SERVER challenge is not answered with them",
+                auth.get("r2") == {"response": "Default"})
+    ok &= check("every other request is continued unchanged",
+                ("Fetch.continueRequest", {"requestId": "r3"}) in sess.sent)
+    obj, Page, sess = make(Exception("Target closed"))
+    err = attempt(lambda: obj._install_proxy_auth("u", "p"))
+    ok &= check("any other authenticate error still propagates",
+                err is not None and "Target closed" in str(err) and not sess.sent)
+    ok &= check("the driver installs auth through _install_proxy_auth only",
+                inspect.getsource(module).count("self.page.authenticate(") == 1)
+    return ok
+
+
 def main() -> int:
     import logging
     # The engines log every fetch at INFO; here that would bury the PASS/FAIL
@@ -1509,7 +1790,9 @@ def main() -> int:
               test_fingerprint_helpers, test_wording, test_fixture_corpus_is_scrubbed,
               test_static_analysis, test_shared_calls_bind, test_dockerfile,
               test_sample_output, test_ci_checks_wired, test_gitignore, test_scraper_api_payload,
-              test_no_env_read_on_help):
+              test_no_env_read_on_help, test_csv_formula_guard, test_output_modes,
+              test_solve_budget, test_no_private_citations, test_canary_assert,
+              test_pyppeteer_proxy_auth):
         ok &= t()
     ok &= test_engines(skips)
     print()

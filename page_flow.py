@@ -126,7 +126,7 @@ def classify(html: Optional[str], status: Optional[int] = None,
 #
 # There is no "solve" column: the captcha check runs on every fetch before
 # the state is decided (a solve can change it), and a column no engine
-# consulted would be policy that reads like enforcement and is not (§17).
+# consulted would be policy that reads like enforcement and is not.
 STATE_POLICY = {
     "content": {"retry": False, "blocked": False},
     # A correct answer. Not retried: retrying spends the user's budget on
@@ -167,6 +167,31 @@ def counts_as_blocked(state: str) -> bool:
 # changing it — and one fresh session is cheap insurance against a scored
 # cookie jar.
 BLOCK_RETRIES_WITHOUT_POOL = 1
+
+
+# Paid captcha solves one page may buy, across ALL of its attempts. A block
+# retry or an exit rotation is a reason to fetch the page again, not a fresh
+# allowance: before this was enforced, one page served a challenge on every
+# attempt bought 2 solves with no pool and 6 with --proxy-block-retries 5.
+SOLVES_PER_PAGE = 1
+
+
+class SolveBudget:
+    """One page's allowance of paid solves, checked BEFORE each purchase.
+
+    Created once per page, outside the retry and rotation loops, and never
+    reset by either.
+    """
+
+    def __init__(self, limit: int = SOLVES_PER_PAGE):
+        self.limit = limit
+        self.spent = 0
+
+    def allows(self) -> bool:
+        return self.spent < self.limit
+
+    def spend(self) -> None:
+        self.spent += 1
 
 
 def served_other_page(asked_url: str, html: str) -> bool:

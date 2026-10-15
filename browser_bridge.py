@@ -180,7 +180,7 @@ class PageOutcome:
     # The server answered with a different page than the URL asked for.
     served_other: bool = False
     # Served (the island or product links were there) and parsed to 0 rows:
-    # this parser's problem, not the end of the listing (§20).
+    # this parser's problem, not the end of the listing.
     parsed_nothing: bool = False
     # An unexpected exception while fetching this page — recorded, masked,
     # so the pages already gathered survive it.
@@ -209,14 +209,15 @@ class PageOutcome:
 # ---------------------------------------------------------------------------
 # Captcha
 # ---------------------------------------------------------------------------
-def handle_captcha_if_present(driver, args) -> bool:
+def handle_captcha_if_present(driver, args, budget=None) -> bool:
     """Detect and solve a reCAPTCHA. True if something was solved.
 
-    Called ONCE per fetch attempt, and a fetch has at most
-    `block_retries + 1` attempts — so a page can buy at most that many
-    solves, and that is the whole budget. (A sibling repo called its solver
-    twice per attempt and counted only one call; one page bought three
-    Turnstile solves.)
+    `budget` is the PAGE's allowance (page_flow.SolveBudget), created once
+    per page by fetch_one_page and shared by every attempt of that page, so
+    a block retry or an exit rotation never buys another solve. It is
+    checked before the purchase, and spent when the solver is called (a
+    failed solve can still be billed). No budget given means a fresh
+    one-solve allowance for this call.
 
     Kohl's renders reCAPTCHA v3 on its account pages (/signin); none was
     found on any listing, search or product page captured. This path exists
@@ -249,6 +250,13 @@ def handle_captcha_if_present(driver, args) -> bool:
         logger.warning("No 2captcha API key is configured, so no solve is "
                        "attempted — continuing with whatever the page already holds.")
         return False
+    if budget is None:
+        budget = page_flow.SolveBudget()
+    if not budget.allows():
+        logger.warning("This page has already used its %d paid solve(s) — not "
+                       "buying another on a retry or a new exit.", budget.limit)
+        return False
+    budget.spend()
     try:
         token = solve_recaptcha(challenge, args.twocaptcha_key,
                                api_version=args.captcha_api,
@@ -309,6 +317,9 @@ def fetch_one_page(driver, args, pool, page_num: int, url: str) -> PageOutcome:
     # jar, same address) — see page_flow for why that number is small.
     block_retries = args.proxy_block_retries if rotating else BLOCK_RETRIES_WITHOUT_POOL
     html, state, status, load_failed = "", "blocked", None, False
+    # One allowance for the whole page: outside the loop, so neither a block
+    # retry nor a rotation to another exit resets it.
+    solve_budget = page_flow.SolveBudget()
 
     for block_attempt in range(block_retries + 1):
         logger.info("Fetching page %d: %s", page_num, url)
@@ -343,7 +354,7 @@ def fetch_one_page(driver, args, pool, page_num: int, url: str) -> PageOutcome:
         if load_failed:
             break
 
-        if handle_captcha_if_present(driver, args):
+        if handle_captcha_if_present(driver, args, solve_budget):
             driver.sleep(1000)
             status = None  # the solve navigated; the old status is stale
 

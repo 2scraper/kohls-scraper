@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 toolkit can: a patch release means "fixes", not that every default is
 frozen — a patch that changes a default says so at the top of its entry.
 
+## [Unreleased]
+
+> **Behaviour changes.** A page that was served with its listing and parsed
+> to zero rows (`served_but_unparsed`) now exits **5**, not 4: exit 4 means
+> the catalogue is empty, and this is a parser failure. A page now buys at
+> most **one** paid captcha solve across all its retries and exit rotations
+> (it could buy up to `--proxy-block-retries + 1`). A rewritten output file
+> keeps its existing permissions instead of being reset to the umask default.
+
+### Fixed
+
+- **CSV formula cells are neutralised.** A string cell starting with `=`,
+  `+`, `-`, `@`, a tab, CR or LF gets a leading apostrophe in the CSV only
+  (after list cells are joined); numbers and the JSON are unchanged. The
+  sidecar records `csv_cells_escaped`.
+- **One paid solve per page.** The allowance is created once per page and
+  checked before the solver is called, so neither a block retry nor a
+  rotation to another exit buys another solve.
+- **Existing output modes are kept.** A 0640 output stayed 0640 only until
+  the next run rewrote it as 0644; new files still follow the umask.
+- **pyppeteer proxy authentication on a current Chromium.** `page.authenticate`
+  needs a CDP method current Chromium no longer has; that one error now
+  falls back to CDP `Fetch.authRequired`, answering only proxy challenges.
+  Not yet run through an authenticated proxy against kohls.com.
+- **A bare `--dump-html page.html` at the repo root is ignored by git.**
+- **The canary fails, rather than skips, without `KOHLS_CDP_ENDPOINT`**, and
+  its thresholds now come from the listing's own stated size instead of a
+  fixed 300-row floor. Exit 3, exit 5 and zero rows are red.
+- Removed references to private notes from comments and docs, and the
+  "credentials live about a day" claim from `.env.example` and the canary,
+  which was never measured for this repo.
+
 ## [1.0.1] - 2026-09-28
 
 Fixes from a third-party audit (2026-09-27) and its re-check. Each is
