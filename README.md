@@ -1,4 +1,4 @@
-# kohls-scraper
+# Kohl's Scraper — Prices, Sale Labels and Stock in Python
 
 [![release](https://img.shields.io/github/v/release/2scraper/kohls-scraper)](https://github.com/2scraper/kohls-scraper/releases)
 [![tests](https://github.com/2scraper/kohls-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/kohls-scraper/actions/workflows/tests.yml)
@@ -7,6 +7,8 @@
 ![licence](https://img.shields.io/badge/licence-MIT-green)
 ![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)
 ![access](https://img.shields.io/badge/served%20to-Scraping%20Browser%20API-orange)
+
+**Kohl's scraper** — an open-source (MIT) Python tool that reads kohls.com category grids, search results and product pages and writes prices and price ranges, sale and clearance labels, ratings, brand and per-SKU stock to JSON or CSV. On 2026-09-25 kohls.com's Akamai refused every local browser and HTTP client tried from US residential addresses and served the Scraping Browser API with a US exit (`country-us`) after two refusals that day. Use it for price and sale monitoring, or compare two runs with `diff_runs.py`.
 
 Open-source scraper for **kohls.com**: category grids, search results and
 product pages, as JSON and CSV — prices and price ranges, sale and clearance
@@ -281,6 +283,23 @@ Scrape responsibly: respect kohls.com's terms of service and robots.txt,
 rate-limit your requests, and collect only public data. This project is
 provided as-is for legitimate uses such as price monitoring and market
 research; how you use it is your responsibility.
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Maison KOSÉ scraper](https://github.com/2scraper/kose-scraper) — Kosé's Japanese online store (maison.kose.co.jp)
+- [LG scraper](https://github.com/2scraper/lg-scraper) — Every model in an lg.com category
+- [Lidl US scraper](https://github.com/2scraper/lidl-scraper) — Grocery prices, unit prices and pack sizes from lidl.com…
+- [MediaMarkt scraper](https://github.com/2scraper/mediamarkt-scraper) — Category grids, search results and product pages from ten…
+- [Montblanc scraper](https://github.com/2scraper/montblanc-scraper) — Per-market prices, stock, collections and full variant…
+- [Pottery Barn scraper](https://github.com/2scraper/potterybarn-scraper) — Every product in a Pottery Barn category, and every SKU's…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
 
 ## Licence
 
