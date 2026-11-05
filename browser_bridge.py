@@ -360,6 +360,18 @@ def fetch_one_page(driver, args, pool, page_num: int, url: str) -> PageOutcome:
 
         html = driver.content()
         state = page_flow.classify(html, status=status, url=driver.current_url())
+        if state == "challenge":
+            logger.info("Page %d came back as Akamai's challenge — giving it up "
+                        "to %.0fs to clear itself before judging the page.",
+                        page_num, page_flow.CHALLENGE_SETTLE_MS / 1000)
+            html, state = page_flow.settle_challenge(
+                driver.content, driver.sleep, driver.current_url)
+            # The status belonged to the challenge document, not to whatever
+            # replaced it.
+            status = None
+            if state != "challenge":
+                logger.info("The challenge cleared: page %d is now %s.",
+                            page_num, state)
         if not page_flow.should_retry(state):
             break
         if block_attempt < block_retries:

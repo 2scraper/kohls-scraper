@@ -41,10 +41,13 @@ status.
 
 **`akamai-challenge`** — Akamai's behavioural challenge ("Powered and
 protected by Akamai", a press-and-hold button). This repo does not implement
-a solver for it. Over `--cdp-endpoint` the Scraping Browser's
+a paid solver for it. Over `--cdp-endpoint` the Scraping Browser's
 `Captcha.setAutoSolve` is enabled (logged as "enabled" by Playwright and
-pyppeteer in live runs); whether it clears this particular challenge has not
-been observed, because the challenge was not met over the Scraping Browser.
+pyppeteer in live runs). Every engine gives the challenge up to 15 s to clear
+before judging the page (logged as "giving it up to 15s to clear itself"):
+on 2026-11-05, over a `country-us` endpoint, it came back on the Cuisinart
+listing and reloaded into the served page about 5 s later. Exit 3 with this
+name means it was still there after that wait.
 
 **A refusal from the Scraping Browser too.** The same `country-us` endpoint
 was refused twice and served when retried later the same day (table above). Wait, then

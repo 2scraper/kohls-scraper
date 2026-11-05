@@ -2,7 +2,6 @@
 
 [![release](https://img.shields.io/github/v/release/2scraper/kohls-scraper)](https://github.com/2scraper/kohls-scraper/releases)
 [![tests](https://github.com/2scraper/kohls-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/kohls-scraper/actions/workflows/tests.yml)
-[![canary](https://github.com/2scraper/kohls-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/kohls-scraper/actions/workflows/canary.yml)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![licence](https://img.shields.io/badge/licence-MIT-green)
 ![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)
@@ -238,8 +237,12 @@ on any listing, search or product page. The solver path (2Captcha,
 `RecaptchaV3TaskProxyless` over the v2 API) runs only when a challenge is
 detected on a page whose products are not already readable. Over
 `--cdp-endpoint`, the Scraping Browser's `Captcha.setAutoSolve` gets the
-first turn. Akamai's behavioural challenge is detected and reported (exit 3);
-this repo does not implement a solver for it.
+first turn. Akamai's behavioural challenge is given up to 15 s to clear
+inside the browser before the page is judged: on 2026-11-05, over a
+`country-us` Scraping Browser endpoint, it reloaded into the served listing
+about 5 s after it appeared, with no solve bought by this repo. A challenge
+still there after that wait is reported (exit 3); this repo does not
+implement a paid solver for it.
 
 ## Diffing runs
 
@@ -271,9 +274,11 @@ are not in the repo), drives the whole run with the browser stubbed out, and
 checks the repo itself: no credential committed, every call binding against
 its callee's signature, the Docker image carrying every module it imports.
 CI runs it on Python 3.9 and 3.12 and in one virtualenv per engine. The
-[canary](.github/workflows/canary.yml) is a real three-page run, dispatched by
-hand with a fresh `KOHLS_CDP_ENDPOINT` secret, and skips without one — a
-runner's own browser is exactly what kohls.com refused.
+[canary](.github/workflows/canary.yml) is a real three-page run through the
+Scraping Browser API, **dispatched by hand only**: there is no scheduled live
+check, so a past canary result says nothing about kohls.com today. It needs
+the `KOHLS_CDP_ENDPOINT` secret and fails without it — a runner's own browser
+is exactly what kohls.com refused.
 
 When something goes wrong: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 

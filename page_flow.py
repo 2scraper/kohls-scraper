@@ -152,6 +152,45 @@ STATE_POLICY = {
 }
 
 
+# How long Akamai's behavioural challenge gets to clear ITSELF before the
+# page is judged. The sec-cpt page is not always a dead end: its own script
+# posts the sensor data and reloads the URL when Akamai accepts it. Measured
+# 2026-11-05 over --cdp-endpoint (Scraping Browser API, US profile): the
+# Cuisinart listing came back as the challenge at 3.8 s and as the served
+# listing at 8.9 s, with no solve bought. Reading the page the moment it
+# arrived reported that as exit 3. 15 s is the measured ~5 s with room; a
+# challenge still there after it is reported as before.
+CHALLENGE_SETTLE_MS = 15000
+SETTLE_POLL_MS = 500
+
+# States a self-clearing challenge passes through on its way to the page:
+# the challenge itself, and the blank document between the reload's unload
+# and its first bytes.
+_SETTLING_STATES = ("challenge", "unloaded")
+
+
+def settle_challenge(content: Callable[[], str], sleep: Callable[[int], None],
+                     current_url: Callable[[], str],
+                     timeout_ms: int = CHALLENGE_SETTLE_MS):
+    """Let a challenge page clear itself; return (html, state) once it has.
+
+    Polls through the driver's own primitives. Bounded twice — by a wall
+    clock deadline and by a number of polls — so a driver whose sleep does
+    not block (a test stub) cannot spin here. Returns the last snapshot when
+    the page is still settling at the end; the caller decides from that.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    polls = max(1, timeout_ms // SETTLE_POLL_MS)
+    html, state = "", "challenge"
+    for _ in range(polls):
+        sleep(SETTLE_POLL_MS)
+        html = content() or ""
+        state = classify(html, url=current_url())
+        if state not in _SETTLING_STATES or time.monotonic() >= deadline:
+            break
+    return html, state
+
+
 def should_retry(state: str) -> bool:
     return STATE_POLICY.get(state, {}).get("retry", False)
 
