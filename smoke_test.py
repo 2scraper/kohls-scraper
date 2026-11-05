@@ -478,11 +478,17 @@ class FakeDriver:
         answer = self.plan.get(pp.page_number_from_url(url) if "prd-" not in url else "detail")
         if isinstance(answer, Exception):
             raise answer
-        self._status, self._html = answer
+        # (status, html, [later, ...]): the document changes under the
+        # driver after each read, as a self-clearing challenge's reload does.
+        self._status, self._html = answer[0], answer[1]
+        self._later = list(answer[2]) if len(answer) > 2 else []
         return self._status
 
     def content(self):
-        return self._html
+        html = self._html
+        if self._later:
+            self._html = self._later.pop(0)
+        return html
 
     def count(self, selector):
         if selector.startswith("astro-island"):
@@ -568,6 +574,16 @@ def test_whole_run():
                 and d.relaunches == page_flow.BLOCK_RETRIES_WITHOUT_POOL)
     rc, _, _ = _run(["--url", url4], {1: (200, cha)})
     ok &= check("Akamai's challenge on page 1: exit 3", rc == EXIT_BLOCKED)
+    # Measured 2026-11-05 over the Scraping Browser: the challenge reloaded
+    # itself into the listing ~5 s later. Judging the first snapshot was exit 3.
+    blank = "<html><head></head><body></body></html>"
+    rc, meta, rows = _run(["--url", url4], {1: (200, cha, [cha, blank, s4])})
+    d = FakeDriver.instances[0]
+    ok &= check("a challenge that clears itself: exit 0 with the page's rows, "
+                "and no second fetch", rc == 0 and rows and len(d.gotos) == 1)
+    rc, meta, rows = _run(["--url", url4], {1: (403, cha, [cha, s4])})
+    ok &= check("...also when the challenge came under HTTP 403",
+                rc == 0 and rows)
     rc, _, _ = _run(["--url", url4], {1: (200, "<html><head></head><body></body></html>")})
     ok &= check("a blank page 1: exit 5 (never obtained), not 3 and not 4",
                 rc == EXIT_FETCH_FAILED)

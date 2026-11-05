@@ -8,6 +8,23 @@ frozen — a patch that changes a default says so at the top of its entry.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Akamai's behavioural challenge is given time to clear.** A page that
+  arrives as the challenge is now re-read for up to 15 s before it is judged,
+  in all three engines. On 2026-11-05, over a `country-us` Scraping Browser
+  endpoint, the Cuisinart listing came back as the challenge and reloaded
+  into the served page about 5 s later; the run used to read the first
+  snapshot and exit 3. A challenge still present after the wait is reported
+  as before (exit 3).
+
+### Changed
+
+- **README no longer shows a canary badge.** The canary is dispatched by
+  hand only; a badge suggested a regular live check that does not exist.
+  The Testing section now says so, and that the canary fails (not skips)
+  without `KOHLS_CDP_ENDPOINT`.
+
 ## [1.1.0] - 2026-10-15
 
 > **Behaviour changes.** A page that was served with its listing and parsed
