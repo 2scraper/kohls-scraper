@@ -20,6 +20,8 @@ frozen — a patch that changes a default says so at the top of its entry.
 
 ### Changed
 
+- CI only: the offline-checks job runs on `ubuntu-24.04` instead of `ubuntu-latest`, which moved to Ubuntu 26.04, where `actions/setup-python` has no Python 3.9 build. 3.9 stays the supported floor.
+- Docker: the image installs `libatomic1` before Playwright. Recent Playwright releases' Node driver needs it to run `playwright install` at all, and the slim base image does not ship it, so the image build failed.
 - **README no longer shows a canary badge.** The canary is dispatched by
   hand only; a badge suggested a regular live check that does not exist.
   The Testing section now says so, and that the canary fails (not skips)
